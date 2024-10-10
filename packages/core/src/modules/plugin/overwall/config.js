@@ -36,14 +36,12 @@ module.exports = {
     '*.intlify.dev': true,
     '*.segment.io': true,
     '*.shields.io': true,
-    '*.jsdelivr.net': true,
-    '*.openai.com': true,
-    '*.chatgpt.com': true
+    '*.jsdelivr.net': true
   },
   pac: {
     enabled: true,
     autoUpdate: true,
-    pacFileUpdateUrl: 'https://gitlab.com/gfwlist/gfwlist/raw/master/gfwlist.txt',
+    pacFileUpdateUrl: 'https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt',
     pacFileAbsolutePath: null, // 自定义 pac.txt 文件位置，可以是本地文件路径
     pacFilePath: './extra/pac/pac.txt' // 内置 pac.txt 文件路径
   }

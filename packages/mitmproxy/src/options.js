@@ -69,7 +69,9 @@ module.exports = (serverConfig) => {
     }
 
     if (!pacConfig.pacFileAbsolutePath) {
+      log.info('setting.rootDir:', setting.rootDir)
       pacConfig.pacFileAbsolutePath = path.join(setting.rootDir, pacConfig.pacFilePath)
+      log.info('读取内置的 pac.txt 文件:', pacConfig.pacFileAbsolutePath)
       if (pacConfig.autoUpdate) {
         log.warn('远程 pac.txt 文件下载失败或还在下载中，现使用内置 pac.txt 文件:', pacConfig.pacFileAbsolutePath)
       }
@@ -103,7 +105,7 @@ module.exports = (serverConfig) => {
       const hostname = req.url.split(':')[0]
       const inWhiteList = matchUtil.matchHostname(whiteList, hostname, 'in whiteList') != null
       if (inWhiteList) {
-        log.info('为白名单域名，不拦截:', hostname)
+        log.info(`为白名单域名，不拦截: ${hostname}, headers:`, req.headers)
         return false // 所有都不拦截
       }
       // 配置了拦截的域名，将会被代理
@@ -124,12 +126,9 @@ module.exports = (serverConfig) => {
       const matchInterceptsOpts = {}
       for (const regexp in interceptOpts) { // 遍历拦截配置
         // 判断是否匹配拦截器
-        let matched
-        if (regexp !== true && regexp !== 'true') {
-          matched = matchUtil.isMatched(rOptions.path, regexp)
-          if (matched == null) { // 拦截器匹配失败
-            continue
-          }
+        const matched = matchUtil.isMatched(rOptions.path, regexp)
+        if (matched == null) { // 拦截器匹配失败
+          continue
         }
 
         // 获取拦截器

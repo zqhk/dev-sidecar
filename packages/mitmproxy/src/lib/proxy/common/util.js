@@ -24,15 +24,34 @@ function getTimeoutConfig (hostname, serverSetting) {
   }
 }
 
-function createHttpsAgent (timeoutConfig) {
+function createHttpsAgent (timeoutConfig, verifySsl) {
   const key = timeoutConfig.timeout + '-' + timeoutConfig.keepAliveTimeout
   if (!httpsAgentCache[key]) {
-    httpsAgentCache[key] = new HttpsAgent({
+    verifySsl = !!verifySsl
+
+    // 证书回调函数
+    const checkServerIdentity = (host, cert) => {
+      log.info(`checkServerIdentity: ${host}, CN: ${cert.subject.CN}, C: ${cert.subject.C || cert.issuer.C}, ST: ${cert.subject.ST || cert.issuer.ST}, bits: ${cert.bits}`)
+    }
+
+    const agent = new HttpsAgent({
       keepAlive: true,
       timeout: timeoutConfig.timeout,
       keepAliveTimeout: timeoutConfig.keepAliveTimeout,
+      checkServerIdentity,
+      rejectUnauthorized: verifySsl
+    })
+
+    agent.unVerifySslAgent = new HttpsAgent({
+      keepAlive: true,
+      timeout: timeoutConfig.timeout,
+      keepAliveTimeout: timeoutConfig.keepAliveTimeout,
+      checkServerIdentity,
       rejectUnauthorized: false
     })
+
+    httpsAgentCache[key] = agent
+    log.info('创建 HttpsAgent 成功, timeoutConfig:', timeoutConfig, ', verifySsl:', verifySsl)
   }
   return httpsAgentCache[key]
 }
@@ -45,13 +64,14 @@ function createHttpAgent (timeoutConfig) {
       timeout: timeoutConfig.timeout,
       keepAliveTimeout: timeoutConfig.keepAliveTimeout
     })
+    log.info('创建 HttpAgent 成功, timeoutConfig:', timeoutConfig)
   }
   return httpAgentCache[key]
 }
 
-function createAgent (protocol, timeoutConfig) {
+function createAgent (protocol, timeoutConfig, verifySsl) {
   return protocol === 'https:'
-    ? createHttpsAgent(timeoutConfig)
+    ? createHttpsAgent(timeoutConfig, verifySsl)
     : createHttpAgent(timeoutConfig)
 }
 
@@ -110,7 +130,7 @@ util.getOptionsFromRequest = (req, ssl, externalProxy = null, serverSetting) => 
     if (headers.connection !== 'close') {
       const timeoutConfig = getTimeoutConfig(hostname, serverSetting)
       // log.info(`get timeoutConfig '${hostname}':`, timeoutConfig)
-      agent = createAgent(protocol, timeoutConfig)
+      agent = createAgent(protocol, timeoutConfig, serverSetting.verifySsl)
       headers.connection = 'keep-alive'
     } else {
       agent = false

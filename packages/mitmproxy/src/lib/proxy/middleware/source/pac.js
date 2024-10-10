@@ -8,6 +8,7 @@ function createPacClient (pacFilePath) {
   function readFile (location) {
     try {
       log.info('pac root dir:', path.resolve('./'))
+      log.info('pac location:', location)
       const filePath = path.resolve(location)
       log.info('read pac path:', filePath)
       return fs.readFileSync(location).toString()
@@ -19,7 +20,7 @@ function createPacClient (pacFilePath) {
 
   const getRules = function (pacFilePath) {
     let text = readFile(pacFilePath)
-    if (text.indexOf('!---------------------EOF') === -1) {
+    if (text.indexOf('!---------------------EOF') < 0) {
       text = Buffer.from(text, 'base64').toString()
     }
     const rules = []

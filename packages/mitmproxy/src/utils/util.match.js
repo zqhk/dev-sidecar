@@ -2,6 +2,10 @@ const lodash = require('lodash')
 const log = require('./util.log')
 
 function isMatched (url, regexp) {
+  if (regexp === '.*' || regexp === '*' || regexp === 'true' || regexp === true) {
+    return [url]
+  }
+
   try {
     let urlRegexp = regexp
     if (regexp[0] === '*' || regexp[0] === '?' || regexp[0] === '+') {
@@ -10,12 +14,12 @@ function isMatched (url, regexp) {
     return url.match(urlRegexp)
   } catch (e) {
     log.error('匹配串有问题:', regexp)
-    return false
+    return null
   }
 }
 
 function domainRegexply (target) {
-  if (target === '.*') {
+  if (target === '.*' || target === '*' || target === 'true' || target === true) {
     return '^.*$'
   }
   return '^' + target.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$'

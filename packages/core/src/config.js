@@ -85,14 +85,15 @@ const configApi = {
       log.info('开始下载远程配置:', remoteConfigUrl)
 
       const headers = {
-        'Cache-Control': 'no-cache' // 禁止使用缓存
+        'Cache-Control': 'no-cache', // 禁止使用缓存
+        Pragma: 'no-cache' // 禁止使用缓存
       }
       if (remoteConfigUrl.startsWith('https://raw.githubusercontent.com/')) {
         headers['Server-Name'] = 'baidu.com'
       }
       request(remoteConfigUrl, { headers }, (error, response, body) => {
         if (error) {
-          log.error('下载远程配置失败, error:', error, ', response:', response, ', body:', body)
+          log.error(`下载远程配置失败: ${remoteConfigUrl}, error:`, error, ', response:', response, ', body:', body)
           reject(error)
           return
         }
@@ -124,11 +125,11 @@ const configApi = {
 
           resolve()
         } else {
-          log.error('下载远程配置失败, response:', response, ', body:', body)
+          log.error(`下载远程配置失败: ${remoteConfigUrl}, response:`, response, ', body:', body)
 
           let message
           if (response) {
-            message = '下载远程配置失败: ' + response.message + ', code: ' + response.statusCode
+            message = `下载远程配置失败: ${remoteConfigUrl}, message: ${response.message}, code: ${response.statusCode}`
           } else {
             message = '下载远程配置失败: response: ' + response
           }

@@ -27,6 +27,7 @@ module.exports = {
       personalUrl: ''
     },
     startShowWindow: true, // 启动时是否打开窗口：true=打开窗口, false=隐藏窗口
+    showHideShortcut: 'Alt + S', // 显示/隐藏窗口快捷键
     windowSize: { width: 900, height: 750 }, // 启动时，窗口的尺寸
     theme: 'dark', // 主题：light=亮色, dark=暗色
     autoChecked: true, // 是否自动检查更新
@@ -117,6 +118,11 @@ module.exports = {
           desc: '仓库内脚本，重定向改为代理，并设置响应头Content-Type。作用：方便script拦截器直接使用，避免引起跨域问题和脚本内容限制问题。'
         }
       },
+      '*.github.com': {
+        '.*': {
+          sni: 'baidu.com'
+        }
+      },
       'github-releases.githubusercontent.com': {
         '.*': {
           sni: 'baidu.com'
@@ -128,15 +134,10 @@ module.exports = {
         }
       },
       'camo.githubusercontent.com': {
-        '.*': {
-          sni: 'baidu.com'
-        },
         '^[a-zA-Z0-9/]+(\\?.*)?$': {
           cacheDays: 365,
           desc: '图片，缓存1年'
-        }
-      },
-      'collector.github.com': {
+        },
         '.*': {
           sni: 'baidu.com'
         }
@@ -182,12 +183,7 @@ module.exports = {
           desc: 'github的访问速度分析上传，没有必要，直接返回成功'
         }
       },
-      'hub.docker.com': {
-        '.*': {
-          sni: 'baidu.com'
-        }
-      },
-      'api.dso.docker.com': {
+      '*.docker.com': {
         '.*': {
           sni: 'baidu.com'
         }
@@ -199,11 +195,6 @@ module.exports = {
           desc: '登录页面的ico，采用hub.docker.com的'
         }
       },
-      // '*.v2ex.com': {
-      //   '.*': {
-      //     sni: 'baidu.com'
-      //   }
-      // },
       // google cdn
       'www.google.com': {
         '/recaptcha/.*': { proxy: 'www.recaptcha.net' }
@@ -289,16 +280,12 @@ module.exports = {
         '20.200.245.247',
         '20.201.28.151',
         '20.205.243.166',
-        '20.248.137.48',
-        '104.244.46.165',
         '140.82.113.3',
         '140.82.114.4',
         '140.82.116.3',
         '140.82.116.4',
         '140.82.121.3',
-        '140.82.121.4',
-        '199.59.148.9',
-        '199.59.149.235'
+        '140.82.121.4'
       ],
       'api.github.com': [
         '20.26.156.210',
@@ -343,9 +330,6 @@ module.exports = {
         '185.199.109.153',
         '185.199.110.153',
         '185.199.111.153'
-      ],
-      'collector.github.com': [
-        '0.0.0.0'
       ]
     },
     whiteList: {

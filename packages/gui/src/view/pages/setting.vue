@@ -36,10 +36,10 @@
         </div>
       </a-form-item>
       <a-form-item label="共享远程配置地址" :label-col="labelCol" :wrapper-col="wrapperCol">
-        <a-input v-model="config.app.remoteConfig.url"></a-input>
+        <a-input v-model="config.app.remoteConfig.url" :title="config.app.remoteConfig.url"></a-input>
       </a-form-item>
       <a-form-item label="个人远程配置地址" :label-col="labelCol" :wrapper-col="wrapperCol">
-        <a-input v-model="config.app.remoteConfig.personalUrl"></a-input>
+        <a-input v-model="config.app.remoteConfig.personalUrl" :title="config.app.remoteConfig.personalUrl"></a-input>
       </a-form-item>
       <a-form-item label="重载远程配置" :label-col="labelCol" :wrapper-col="wrapperCol">
         <a-button :disabled="config.app.remoteConfig.enabled === false" :loading="reloadLoading" icon="sync" @click="reloadRemoteConfig()">重载远程配置</a-button>
@@ -86,6 +86,13 @@
         </a-radio-group>
         <div class="form-help">
           点击窗口右上角关闭按钮的效果
+        </div>
+      </a-form-item>
+      <hr/>
+      <a-form-item label="打开窗口快捷键" :label-col="labelCol" :wrapper-col="wrapperCol">
+        <a-input v-model="config.app.showHideShortcut" @change="shortcutChange" @keydown="shortcutKeyDown" @keyup="shortcutKeyUp"></a-input>
+        <div class="form-help">
+          部分快捷键已被占用：F5=刷新页面，F12=开发者工具（DevTools）
         </div>
       </a-form-item>
       <a-form-item label="启动时打开窗口" :label-col="labelCol" :wrapper-col="wrapperCol">
@@ -146,6 +153,8 @@
 
 <script>
 import Plugin from '../mixins/plugin'
+import { ipcRenderer } from 'electron'
+
 export default {
   name: 'Setting',
   mixins: [Plugin],
@@ -174,6 +183,154 @@ export default {
       const dir = await this.$api.info.getConfigDir()
       this.$api.ipc.openPath(dir + '/logs/')
     },
+    getEventKey (event) {
+      // 忽略以下键
+      switch (event.key) {
+        case 'Control':
+        case 'Alt':
+        case 'Shift':
+        case 'Meta': // Window键
+        case 'Escape':
+        case 'Backspace':
+        case 'Tab':
+        case 'CapsLock':
+        case 'NumLock':
+        case 'Enter':
+        case 'ArrowUp':
+        case 'ArrowDown':
+        case 'ArrowLeft':
+        case 'ArrowRight':
+          return ''
+      }
+
+      switch (event.code) {
+        // F1 ~ F12
+        case 'F1': return 'F1'
+        case 'F2': return 'F2'
+        case 'F3': return 'F3'
+        case 'F4': return 'F4'
+        case 'F5': return 'F5'
+        case 'F6': return 'F6'
+        case 'F7': return 'F7'
+        case 'F8': return 'F8'
+        case 'F9': return 'F9'
+        case 'F10': return 'F10'
+        case 'F11': return 'F11'
+        case 'F12': return 'F12'
+
+        // 0 ~ 9
+        case 'Digit0': return '0'
+        case 'Digit1': return '1'
+        case 'Digit2': return '2'
+        case 'Digit3': return '3'
+        case 'Digit4': return '4'
+        case 'Digit5': return '5'
+        case 'Digit6': return '6'
+        case 'Digit7': return '7'
+        case 'Digit8': return '8'
+        case 'Digit9': return '9'
+
+        case 'Backquote': return '`'
+        case 'Minus': return '-'
+        case 'Equal': return '='
+        case 'Space': return 'Space'
+
+        case 'BracketLeft': return '['
+        case 'BracketRight': return ']'
+        case 'Backslash': return '\\'
+        case 'Semicolon': return ';'
+        case 'Quote': return '\''
+        case 'Comma': return ','
+        case 'Period': return '.'
+        case 'Slash': return '/'
+
+        case 'Insert': return 'Insert'
+        case 'Delete': return 'Delete'
+        case 'Home': return 'Home'
+        case 'End': return 'End'
+        case 'PageUp': return 'PageUp'
+        case 'PageDown': return 'PageDown'
+
+        // 小键盘
+        case 'Numpad1': return 'Num1'
+        case 'Numpad2': return 'Num2'
+        case 'Numpad3': return 'Num3'
+        case 'Numpad4': return 'Num4'
+        case 'Numpad5': return 'Num5'
+        case 'Numpad6': return 'Num6'
+        case 'Numpad7': return 'Num7'
+        case 'Numpad8': return 'Num8'
+        case 'Numpad9': return 'Num9'
+        case 'Numpad0': return 'Num0'
+
+        // 不支持监听以下几个键，返回空
+        case 'NumpadDivide': // return 'Num/'
+        case 'NumpadMultiply': // return 'Num*'
+        case 'NumpadDecimal': // return 'Num.'
+        case 'NumpadSubtract': // return 'Num-'
+        case 'NumpadAdd': // return 'Num+'
+          return ''
+      }
+
+      // 字母
+      if (event.code.startsWith('Key') && event.code.length === 4) {
+        return event.key.toUpperCase()
+      }
+
+      console.error(`未能识别的按键：key=${event.key}, code=${event.code}, keyCode=${event.keyCode}`)
+      return ''
+    },
+    async disableBeforeInputEvent () {
+      clearTimeout(window.enableBeforeInputEventTimeout)
+      window.config.disableBeforeInputEvent = true
+      window.enableBeforeInputEventTimeout = setTimeout(function () {
+        window.config.disableBeforeInputEvent = false
+      }, 2000)
+    },
+    shortcutChange () {
+      this.config.app.showHideShortcut = '无'
+    },
+    shortcutKeyUp (event) {
+      event.preventDefault()
+      this.disableBeforeInputEvent()
+    },
+    shortcutKeyDown (event) {
+      event.preventDefault()
+      this.disableBeforeInputEvent()
+
+      // console.info(`code=${event.code}, key=${event.key}, keyCode=${event.keyCode}`)
+      if (event.type !== 'keydown') {
+        return
+      }
+
+      const key = this.getEventKey(event)
+      if (!key) {
+        this.config.app.showHideShortcut = '无'
+        return
+      }
+
+      // 判断 Ctrl、Alt、Shift、Window 按钮是否已按下，如果已按下，则拼接键值
+      let shortcut = event.ctrlKey ? 'Ctrl + ' : ''
+      if (event.altKey) shortcut += 'Alt + '
+      if (event.shiftKey) shortcut += 'Shift + '
+      if (event.metaKey) shortcut += 'Meta + '
+
+      // 如果以上按钮都没有按下，并且当前键不是F1~F4、F6~F11时，则直接返回（注：F5已经是刷新页面快捷键、F12已经是打开DevTools的快捷键了）
+      if (shortcut === '' && !key.match(/^F([12346789]|1[01])$/g)) {
+        this.config.app.showHideShortcut = '无'
+        return
+      }
+
+      // 拼接键值
+      shortcut += key
+
+      this.config.app.showHideShortcut = shortcut
+    },
+    async applyBefore () {
+      if (!this.config.app.showHideShortcut) {
+        this.config.app.showHideShortcut = '无'
+      }
+    },
     async applyAfter () {
       let reloadLazy = 10
 
@@ -188,6 +345,9 @@ export default {
       if (this.config.app.theme !== this.themeBackup) {
         setTimeout(() => window.location.reload(), reloadLazy)
       }
+
+      // 变更 “打开窗口快捷键”
+      ipcRenderer.send('change-showHideShortcut', this.config.app.showHideShortcut)
     },
     async openExternal (url) {
       await this.$api.ipc.openExternal(url)

@@ -1,6 +1,7 @@
 const http = require('http')
 const https = require('https')
 const commonUtil = require('../common/util')
+const jsonApi = require('../../../json')
 // const upgradeHeader = /(^|,)\s*upgrade\s*($|,)/i
 const DnsUtil = require('../../dns/index')
 const log = require('../../../utils/util.log')
@@ -16,13 +17,7 @@ module.exports = function createRequestHandler (createIntercepts, middlewares, e
     let proxyReq
 
     const rOptions = commonUtil.getOptionsFromRequest(req, ssl, externalProxy, setting)
-    const url = `${rOptions.method} ➜ ${rOptions.protocol}//${rOptions.hostname}:${rOptions.port}${rOptions.path}`
-
-    if (rOptions.agent) {
-      rOptions.agent.options.rejectUnauthorized = setting.verifySsl
-    } else if (rOptions.agent !== false) {
-      log.error('rOptions.agent 的值有问题:', rOptions)
-    }
+    let url = `${rOptions.method} ➜ ${rOptions.protocol}//${rOptions.hostname}:${rOptions.port}${rOptions.path}`
 
     if (rOptions.headers.connection === 'close') {
       req.socket.setKeepAlive(false)
@@ -109,8 +104,9 @@ module.exports = function createRequestHandler (createIntercepts, middlewares, e
         onFree()
 
         function onFree () {
+          url = `${rOptions.method} ➜ ${rOptions.protocol}//${rOptions.hostname}:${rOptions.port}${rOptions.path}`
           const start = new Date()
-          log.info('发起代理请求:', url, (rOptions.servername ? ', sni: ' + rOptions.servername : ''))
+          log.info('发起代理请求:', url, (rOptions.servername ? ', sni: ' + rOptions.servername : ''), ', headers:', rOptions.headers)
 
           const isDnsIntercept = {}
           if (dnsConfig && dnsConfig.providers) {
@@ -133,6 +129,7 @@ module.exports = function createRequestHandler (createIntercepts, middlewares, e
           // log.debug('rOptions:', rOptions.hostname + rOptions.path, '\r\n', rOptions)
           // log.debug('agent:', rOptions.agent)
           // log.debug('agent.options:', rOptions.agent.options)
+          res.setHeader('DS-Proxy-Request', rOptions.hostname)
           proxyReq = (rOptions.protocol === 'https:' ? https : http).request(rOptions, (proxyRes) => {
             const cost = new Date() - start
             if (rOptions.protocol === 'https:') {
@@ -153,7 +150,7 @@ module.exports = function createRequestHandler (createIntercepts, middlewares, e
           proxyReq.on('timeout', () => {
             const cost = new Date() - start
             const errorMsg = `代理请求超时: ${url}, cost: ${cost} ms`
-            log.error(errorMsg)
+            log.error(errorMsg, ', rOptions:', jsonApi.stringify2(rOptions))
             countSlow(isDnsIntercept, `代理请求超时, cost: ${cost} ms`)
             proxyReq.end()
             proxyReq.destroy()
@@ -163,14 +160,14 @@ module.exports = function createRequestHandler (createIntercepts, middlewares, e
           })
           proxyReq.on('error', (e) => {
             const cost = new Date() - start
-            log.error(`代理请求错误: ${url}, cost: ${cost} ms, error:`, e)
+            log.error(`代理请求错误: ${url}, cost: ${cost} ms, error:`, e, ', rOptions:', jsonApi.stringify2(rOptions))
             countSlow(isDnsIntercept, '代理请求错误: ' + e.message)
             reject(e)
           })
           proxyReq.on('aborted', () => {
             const cost = new Date() - start
             const errorMsg = `代理请求被取消: ${url}, cost: ${cost} ms`
-            log.error(errorMsg)
+            log.error(errorMsg, ', rOptions:', jsonApi.stringify2(rOptions))
 
             if (cost > MAX_SLOW_TIME) {
               countSlow(isDnsIntercept, `代理请求被取消，且请求太慢, cost: ${cost} ms > ${MAX_SLOW_TIME} ms`)
@@ -186,7 +183,7 @@ module.exports = function createRequestHandler (createIntercepts, middlewares, e
           req.on('aborted', function () {
             const cost = new Date() - start
             const errorMsg = `请求被取消: ${url}, cost: ${cost} ms`
-            log.error(errorMsg)
+            log.error(errorMsg, ', rOptions:', jsonApi.stringify2(rOptions))
             proxyReq.abort()
             if (res.writableEnded) {
               return
@@ -195,13 +192,13 @@ module.exports = function createRequestHandler (createIntercepts, middlewares, e
           })
           req.on('error', function (e, req, res) {
             const cost = new Date() - start
-            log.error(`请求错误: ${url}, cost: ${cost} ms, error:`, e)
+            log.error(`请求错误: ${url}, cost: ${cost} ms, error:`, e, ', rOptions:', jsonApi.stringify2(rOptions))
             reject(e)
           })
           req.on('timeout', () => {
             const cost = new Date() - start
             const errorMsg = `请求超时: ${url}, cost: ${cost} ms`
-            log.error(errorMsg)
+            log.error(errorMsg, ', rOptions:', jsonApi.stringify2(rOptions))
             reject(new Error(errorMsg))
           })
           req.pipe(proxyReq)
