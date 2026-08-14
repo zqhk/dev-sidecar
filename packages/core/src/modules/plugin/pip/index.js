@@ -1,13 +1,18 @@
 const pipConfig = require('./config')
+
 const PipPlugin = function (context) {
   const { config, shell, event, log } = context
   const api = {
     async start () {
       await api.setRegistry({ registry: config.get().plugin.pip.setting.registry })
       await api.setTrustedHost(config.get().plugin.pip.setting.trustedHost)
+      event.fire('status', { key: 'plugin.pip.enabled', value: true })
+      log.info('开启【Pip】代理成功')
     },
 
     async close () {
+      event.fire('status', { key: 'plugin.pip.enabled', value: false })
+      log.info('关闭【Pip】代理成功')
     },
 
     async restart () {
@@ -16,11 +21,11 @@ const PipPlugin = function (context) {
     },
 
     async save (newConfig) {
-      await api.setVariables()
     },
+
     async getPipEnv () {
       const command = config.get().plugin.pip.setting.command
-      let ret = await shell.exec([command + ' config list'], { type: 'cmd' })
+      let ret = await shell.exec([`${command} config list`], { type: 'cmd' })
       if (ret != null) {
         ret = ret.trim()
         const lines = ret.split('\n')
@@ -29,10 +34,10 @@ const PipPlugin = function (context) {
           if (!line.startsWith('global')) {
             continue
           }
-          const key = line.substring(0, line.indexOf('='))
-          let value = line.substring(line.indexOf('=') + 1)
+          const key = line.substring(0, line.indexOf('=')).trim()
+          let value = line.substring(line.indexOf('=') + 1).trim()
           if (value.startsWith('\'')) {
-            value = value.startsWith(1, value.length - 1)
+            value = value.slice(1, -1)
           }
           vars[key] = value
         }
@@ -51,8 +56,7 @@ const PipPlugin = function (context) {
           cmds.push(`${command} config unset  global.${item.key}`)
         }
       }
-      const ret = await shell.exec(cmds, { type: 'cmd' })
-      return ret
+      return await shell.exec(cmds, { type: 'cmd' })
     },
 
     async unsetPipEnv (list) {
@@ -61,8 +65,7 @@ const PipPlugin = function (context) {
       for (const item of list) {
         cmds.push(`${command} config unset  global.${item} `)
       }
-      const ret = await shell.exec(cmds, { type: 'cmd' })
-      return ret
+      return await shell.exec(cmds, { type: 'cmd' })
     },
 
     async setRegistry ({ registry }) {
@@ -76,12 +79,10 @@ const PipPlugin = function (context) {
     },
 
     async setProxy (ip, port) {
-
     },
 
     async unsetProxy () {
-
-    }
+    },
   }
   return api
 }
@@ -90,7 +91,7 @@ module.exports = {
   key: 'pip',
   config: pipConfig,
   status: {
-    enabled: false
+    enabled: false,
   },
-  plugin: PipPlugin
+  plugin: PipPlugin,
 }

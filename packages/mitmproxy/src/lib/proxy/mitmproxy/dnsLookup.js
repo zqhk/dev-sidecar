@@ -1,60 +1,120 @@
+const defaultDns = require('node:dns')
+const net = require('node:net')
+const log = require('../../../utils/util.log.server')
 const speedTest = require('../../speed')
-const log = require('../../../utils/util.log')
-const defaultDns = require('dns')
+
+// HTTP/2 头值只允许 ASCII 可见字符，需过滤中文等非 ASCII 字符
+function safeHeaderValue (value) {
+  return String(value).replace(/[^\x20-\x7E]/g, '')
+}
+
+function isValidIpAddress (ip) {
+  return typeof ip === 'string' && net.isIP(ip) !== 0
+}
+
+function getAddressFamily (ip) {
+  return net.isIP(ip) === 6 ? 6 : 4
+}
+
+function respondLookup (callback, ip, family, all) {
+  if (all) {
+    callback(null, [{ address: ip, family }])
+    return
+  }
+
+  callback(null, ip, family)
+}
+
+function createIpChecker (tester) {
+  if (!tester || tester.backupList == null || tester.backupList.length === 0) {
+    return null
+  }
+
+  return (ip) => {
+    for (let i = 0; i < tester.backupList.length; i++) {
+      const item = tester.backupList[i]
+      if (item.host === ip) {
+        if (item.time > 0) {
+          return true // IP测速成功
+        }
+        if (item.status === 'failed') {
+          return false // IP测速失败
+        }
+        break
+      }
+    }
+
+    return true // IP测速未知
+  }
+}
 
 module.exports = {
-  createLookupFunc: function (res, dns, action, target, isDnsIntercept) {
-    target = target ? (', target: ' + target) : ''
+  createLookupFunc (res, dnsAndFamily, action, target, port, isDnsIntercept) {
+    target = target ? (`, target: ${target}`) : ''
+
+    const dns = dnsAndFamily.dns
+    const family = Number.parseInt(dnsAndFamily.family) === 6 ? 6 : 4
 
     return (hostname, options, callback) => {
-      const tester = speedTest.getSpeedTester(hostname)
-      if (tester && tester.ready) {
+      const all = options && options.all === true
+      const tester = speedTest.getSpeedTester(hostname, port)
+      if (tester) {
         const aliveIpObj = tester.pickFastAliveIpObj()
-        if (aliveIpObj) {
+        if (aliveIpObj && isValidIpAddress(aliveIpObj.host)) {
+          const addressFamily = getAddressFamily(aliveIpObj.host)
           log.info(`----- ${action}: ${hostname}, use alive ip from dns '${aliveIpObj.dns}': ${aliveIpObj.host}${target} -----`)
-          if (res) res.setHeader('DS-DNS-Lookup', `IpTester: ${aliveIpObj.host} ${aliveIpObj.dns === '预设IP' ? 'PreSet' : aliveIpObj.dns}`)
-          callback(null, aliveIpObj.host, 4)
+          if (res) {
+            const dnsLabel = aliveIpObj.dns === '预设IP' ? 'PreSet' : safeHeaderValue(aliveIpObj.dns)
+            res.setHeader('DS-DNS-Lookup', `IpTester: ${aliveIpObj.host} ${dnsLabel}`)
+          }
+          respondLookup(callback, aliveIpObj.host, addressFamily, all)
           return
         } else {
-          log.info(`----- ${action}: ${hostname}, no alive ip${target}, tester:`, tester)
+          log.info(`----- ${action}: ${hostname}, no valid alive ip${target}, tester: { "ready": ${tester.ready}, "backupList": ${JSON.stringify(tester.backupList)} }`)
         }
       }
-      dns.lookup(hostname).then(ip => {
-        if (isDnsIntercept) {
-          isDnsIntercept.dns = dns
-          isDnsIntercept.hostname = hostname
-          isDnsIntercept.ip = ip
-        }
 
-        if (ip !== hostname) {
-          // 判断是否为测速失败的IP，如果是，则不使用当前IP
-          let isTestFailedIp = false
-          if (tester && tester.ready && tester.backupList && tester.backupList.length > 0) {
-            for (let i = 0; i < tester.backupList.length; i++) {
-              const item = tester.backupList[i]
-              if (item.host === ip) {
-                if (item.time == null) {
-                  isTestFailedIp = true
-                }
-                break
-              }
-            }
+      const ipChecker = createIpChecker(tester)
+
+      // 无已测速的存活 IP，轮转分配未失败 IP 逐个探测，并发请求自动分散
+      if (tester && tester.backupList.length > 0) {
+        const probe = tester.pickNextForProbing()
+        if (probe && isValidIpAddress(probe.host)) {
+          const addressFamily = getAddressFamily(probe.host)
+          log.info(`----- ${action}: ${hostname}, use probing ip: ${probe.host} (family: ${addressFamily})${target} -----`)
+          if (isDnsIntercept) { isDnsIntercept.tester = tester }
+          respondLookup(callback, probe.host, addressFamily, all)
+          return
+        }
+      }
+
+      dns.lookup(hostname, { ipChecker, family }).then((ip) => {
+        if (ip !== hostname && isValidIpAddress(ip)) {
+          const addressFamily = getAddressFamily(ip)
+          if (isDnsIntercept) {
+            isDnsIntercept.dns = dns
+            isDnsIntercept.hostname = hostname
+            isDnsIntercept.ip = ip
+            if (tester) isDnsIntercept.tester = tester
           }
-          if (isTestFailedIp === false) {
-            log.info(`----- ${action}: ${hostname}, use ip from dns '${dns.name}': ${ip}${target} -----`)
-            if (res) res.setHeader('DS-DNS-Lookup', `DNS: ${ip} ${dns.name === '预设IP' ? 'PreSet' : dns.name}`)
-            callback(null, ip, 4)
-            return
-          } else {
-            // 使用默认dns
-            log.info(`----- ${action}: ${hostname}, use hostname by default DNS: ${hostname}, skip test failed ip from dns '${dns.name}: ${ip}'${target}, options:`, options)
+          log.info(`----- ${action}: ${hostname}, use ip from dns '${dns.dnsName}': ${ip}(family: ${addressFamily})${target} -----`)
+          if (res) {
+            const dnsLabel = dns.dnsName === '预设IP' ? 'PreSet' : safeHeaderValue(dns.dnsName)
+            res.setHeader('DS-DNS-Lookup', `DNS: ${ip} (IPv${addressFamily}) ${dnsLabel}`)
           }
+          respondLookup(callback, ip, addressFamily, all)
         } else {
           // 使用默认dns
-          log.info(`----- ${action}: ${hostname}, use hostname by default DNS: ${hostname}${target}, options:`, options, ', dns:', dns)
+          if (ip != null && ip !== hostname && !isValidIpAddress(ip)) {
+            log.warn(`----- ${action}: ${hostname}, dns returned invalid ip '${ip}'${target}, fallback to default DNS`)
+          }
+          log.info(`----- ${action}: ${hostname}, use default DNS: ${hostname}${target}, options:`, options, ', dns:', dns)
+          defaultDns.lookup(hostname, options, callback)
         }
+      }).catch((err) => {
+        log.error(`----- ${action}: ${hostname}, dns lookup error${target}, options:`, options, `, error:`, err)
         defaultDns.lookup(hostname, options, callback)
       })
     }
-  }
+  },
 }

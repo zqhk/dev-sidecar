@@ -1,17 +1,18 @@
 import lodash from 'lodash'
-import Vue from 'vue'
-const status = {
+import { reactive } from 'vue'
+
+const status = reactive({
   server: {
-    enabled: false
+    enabled: false,
   },
   proxy: {
-    enabled: false
+    enabled: false,
   },
   plugin: {
-    node: {}
-  }
-}
-async function install (api) {
+    node: {},
+  },
+})
+async function install (app, api) {
   api.ipc.on('status', (event, message) => {
     console.log('view on status', event, message)
     const value = message.value
@@ -20,10 +21,10 @@ async function install (api) {
   })
   const basicStatus = await api.status.get()
   lodash.merge(status, basicStatus)
-  Vue.prototype.$status = status
+  app.config.globalProperties.$status = status
   return status
 }
 export default {
   install,
-  status
+  status,
 }

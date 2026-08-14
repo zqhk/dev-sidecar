@@ -1,9 +1,13 @@
-const url = require('url')
+const URL = require('node:url')
+const tunnelAgent = require('tunnel-agent')
+const log = require('../../../utils/util.log.server')
+const matchUtil = require('../../../utils/util.match')
 const Agent = require('./ProxyHttpAgent')
 const HttpsAgent = require('./ProxyHttpsAgent')
-const tunnelAgent = require('tunnel-agent')
-const log = require('../../../utils/util.log')
-const matchUtil = require('../../../utils/util.match')
+
+// 匹配形如 `[::1]` 或 `[::1]:443` 的 IPv6 地址（带或不带端口）
+const IPv6_HOST_RE = /^(\[[^\]]+\])(?::(\d+))?$/
+
 const util = exports
 
 const httpsAgentCache = {}
@@ -20,52 +24,78 @@ function getTimeoutConfig (hostname, serverSetting) {
 
   return {
     timeout: timeoutConfig.timeout || serverSetting.defaultTimeout || 20000,
-    keepAliveTimeout: timeoutConfig.keepAliveTimeout || serverSetting.defaultKeepAliveTimeout || 30000
+    keepAliveTimeout: timeoutConfig.keepAliveTimeout || serverSetting.defaultKeepAliveTimeout || 30000,
+    allowTls12: serverSetting.allowTls12 === true,
   }
 }
 
-function createHttpsAgent (timeoutConfig) {
-  const key = timeoutConfig.timeout + '-' + timeoutConfig.keepAliveTimeout
+function createHttpsAgent (timeoutConfig, verifySsl) {
+  verifySsl = !!verifySsl
+  const allowTls12 = timeoutConfig.allowTls12 === true
+  const key = `${timeoutConfig.timeout}-${timeoutConfig.keepAliveTimeout}-${allowTls12 ? 'tls12' : 'tls13'}-${verifySsl ? 'verify' : 'noverify'}`
   if (!httpsAgentCache[key]) {
-    httpsAgentCache[key] = new HttpsAgent({
+
+    // 证书回调函数
+    const checkServerIdentity = (host, cert) => {
+      log.info(`checkServerIdentity: ${host}, CN: ${cert.subject.CN}, C: ${cert.subject.C || cert.issuer.C}, ST: ${cert.subject.ST || cert.issuer.ST}, bits: ${cert.bits}`)
+    }
+
+    const agent = new HttpsAgent({
       keepAlive: true,
       timeout: timeoutConfig.timeout,
       keepAliveTimeout: timeoutConfig.keepAliveTimeout,
-      rejectUnauthorized: false
+      checkServerIdentity,
+      rejectUnauthorized: verifySsl,
+      minVersion: allowTls12 ? 'TLSv1.2' : 'TLSv1.3',
+      maxVersion: 'TLSv1.3',
     })
+
+    agent.unVerifySslAgent = new HttpsAgent({
+      keepAlive: true,
+      timeout: timeoutConfig.timeout,
+      keepAliveTimeout: timeoutConfig.keepAliveTimeout,
+      checkServerIdentity,
+      rejectUnauthorized: false,
+      minVersion: allowTls12 ? 'TLSv1.2' : 'TLSv1.3',
+      maxVersion: 'TLSv1.3',
+    })
+
+    httpsAgentCache[key] = agent
+    log.info('创建 HttpsAgent 成功, timeoutConfig:', timeoutConfig, ', verifySsl:', verifySsl)
   }
   return httpsAgentCache[key]
 }
 
 function createHttpAgent (timeoutConfig) {
-  const key = timeoutConfig.timeout + '-' + timeoutConfig.keepAliveTimeout
+  const key = `${timeoutConfig.timeout}-${timeoutConfig.keepAliveTimeout}`
   if (!httpAgentCache[key]) {
     httpAgentCache[key] = new Agent({
       keepAlive: true,
       timeout: timeoutConfig.timeout,
-      keepAliveTimeout: timeoutConfig.keepAliveTimeout
+      keepAliveTimeout: timeoutConfig.keepAliveTimeout,
     })
+    log.info('创建 HttpAgent 成功, timeoutConfig:', timeoutConfig)
   }
   return httpAgentCache[key]
 }
 
-function createAgent (protocol, timeoutConfig) {
+function createAgent (protocol, timeoutConfig, verifySsl) {
   return protocol === 'https:'
-    ? createHttpsAgent(timeoutConfig)
+    ? createHttpsAgent(timeoutConfig, verifySsl)
     : createHttpAgent(timeoutConfig)
 }
 
 util.parseHostnameAndPort = (host, defaultPort) => {
-  let arr = host.match(/^(\[[^\]]+\])(?::(\d+))?$/) // 尝试解析IPv6
+  let arr = host.match(IPv6_HOST_RE) // 尝试解析IPv6
   if (arr) {
     arr = arr.slice(1)
     if (arr[1]) {
-      arr[1] = parseInt(arr[1], 10)
+      arr[1] = Number.parseInt(arr[1], 10)
     }
   } else {
     arr = host.split(':')
     if (arr.length > 1) {
-      arr[1] = parseInt(arr[1], 10)
+      arr[1] = Number.parseInt(arr[1], 10)
     }
   }
 
@@ -78,12 +108,23 @@ util.parseHostnameAndPort = (host, defaultPort) => {
   return arr
 }
 
-util.getOptionsFromRequest = (req, ssl, externalProxy = null, serverSetting) => {
+util.getOptionsFromRequest = (req, ssl, externalProxy = null, serverSetting, compatibleConfig = null) => {
   // eslint-disable-next-line node/no-deprecated-api
-  const urlObject = url.parse(req.url)
-  const defaultPort = ssl ? 443 : 80
-  const protocol = ssl ? 'https:' : 'http:'
-  const headers = Object.assign({}, req.headers)
+  const urlObj = URL.parse(req.url)
+
+  // 修复：当 ssl=true（请求来自HTTPS代理端口）但请求URL是绝对HTTP路径时，
+  // 说明这是HTTP请求被错误发送到了HTTPS代理端口。
+  // 例：GET http://example.com/path HTTP/1.1 被发送到HTTPS代理端口。
+  // 此时应修正协议为HTTP，避免将HTTP请求以HTTPS方式转发到目标服务器。
+  const isHttpAbsUrl = !!(urlObj.protocol === 'http:' && urlObj.hostname)
+  const actualSsl = ssl && !isHttpAbsUrl
+  const defaultPort = actualSsl ? 443 : 80
+  const protocol = actualSsl ? 'https:' : 'http:'
+  // 过滤 HTTP/2 伪头（:method, :path, :authority, :scheme），
+  // 它们在上游 HTTP/1.1 请求中不合法
+  const headers = Object.fromEntries(
+    Object.entries(req.headers).filter(([key]) => !key.startsWith(':')),
+  )
   let externalProxyUrl = null
 
   if (externalProxy) {
@@ -110,7 +151,7 @@ util.getOptionsFromRequest = (req, ssl, externalProxy = null, serverSetting) => 
     if (headers.connection !== 'close') {
       const timeoutConfig = getTimeoutConfig(hostname, serverSetting)
       // log.info(`get timeoutConfig '${hostname}':`, timeoutConfig)
-      agent = createAgent(protocol, timeoutConfig)
+      agent = createAgent(protocol, timeoutConfig, serverSetting.verifySsl)
       headers.connection = 'keep-alive'
     } else {
       agent = false
@@ -126,19 +167,23 @@ util.getOptionsFromRequest = (req, ssl, externalProxy = null, serverSetting) => 
     url: req.url,
     hostname,
     port,
-    path: urlObject.path,
-    headers: req.headers,
-    agent
+    path: urlObj.path,
+    headers,
+    agent,
+    compatibleConfig,
+    // 增大响应头大小限制（默认 16KB），
+    // 解决 issue #575 中 Google Cloud Console 等站点响应头过大导致的 HPE_HEADER_OVERFLOW 错误
+    maxHeaderSize: 65536,
   }
 
-  // eslint-disable-next-line node/no-deprecated-api
-  if (protocol === 'http:' && externalProxyUrl && (url.parse(externalProxyUrl)).protocol === 'http:') {
+  if (protocol === 'http:' && externalProxyUrl) {
     // eslint-disable-next-line node/no-deprecated-api
-    const externalURL = url.parse(externalProxyUrl)
-    options.hostname = externalURL.hostname
-    options.port = externalURL.port
-    // support non-transparent proxy
-    options.path = `http://${urlObject.host}${urlObject.path}`
+    const externalUrlObj = URL.parse(externalProxyUrl)
+    if (externalUrlObj.protocol === 'http:') {
+      options.hostname = externalUrlObj.hostname
+      options.port = externalUrlObj.port
+      options.path = `http://${externalUrlObj.host}${externalUrlObj.path}`
+    }
   }
 
   // mark a socketId for Agent to bind socket for NTLM
@@ -153,13 +198,13 @@ util.getOptionsFromRequest = (req, ssl, externalProxy = null, serverSetting) => 
 
 util.getTunnelAgent = (requestIsSSL, externalProxyUrl) => {
   // eslint-disable-next-line node/no-deprecated-api
-  const urlObject = url.parse(externalProxyUrl)
-  const protocol = urlObject.protocol || 'http:'
-  let port = urlObject.port
+  const urlObj = URL.parse(externalProxyUrl)
+  const protocol = urlObj.protocol || 'http:'
+  let port = urlObj.port
   if (!port) {
     port = protocol === 'http:' ? 80 : 443
   }
-  const hostname = urlObject.hostname || 'localhost'
+  const hostname = urlObj.hostname || 'localhost'
 
   if (requestIsSSL) {
     if (protocol === 'http:') {
@@ -167,8 +212,8 @@ util.getTunnelAgent = (requestIsSSL, externalProxyUrl) => {
         httpsOverHttpAgent = tunnelAgent.httpsOverHttp({
           proxy: {
             host: hostname,
-            port: port
-          }
+            port,
+          },
         })
       }
       return httpsOverHttpAgent
@@ -177,8 +222,8 @@ util.getTunnelAgent = (requestIsSSL, externalProxyUrl) => {
         httpsOverHttpsAgent = tunnelAgent.httpsOverHttps({
           proxy: {
             host: hostname,
-            port: port
-          }
+            port,
+          },
         })
       }
       return httpsOverHttpsAgent
@@ -199,8 +244,8 @@ util.getTunnelAgent = (requestIsSSL, externalProxyUrl) => {
         httpOverHttpsAgent = tunnelAgent.httpOverHttps({
           proxy: {
             host: hostname,
-            port: port
-          }
+            port,
+          },
         })
       }
       return httpOverHttpsAgent

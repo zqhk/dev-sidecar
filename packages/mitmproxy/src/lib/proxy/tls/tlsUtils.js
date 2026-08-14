@@ -1,14 +1,29 @@
-const forge = require('node-forge')
-const fs = require('fs')
-const log = require('../../../utils/util.log')
-const path = require('path')
-const config = require('../common/config')
+const fs = require('node:fs')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const { promisify } = require('node:util')
 const _ = require('lodash')
-const mkdirp = require('mkdirp')
+const forge = require('node-forge')
+const log = require('../../../utils/util.log.server')
+const config = require('../common/config')
 // const colors = require('colors')
 
 const utils = exports
 const pki = forge.pki
+
+const _generateKeyPair = promisify(crypto.generateKeyPair)
+
+/**
+ * 使用 Node.js 原生 crypto 模块异步生成 RSA 密钥对（在 libuv 线程池中运行，不阻塞事件循环），
+ * 并将结果转换为 node-forge 格式。
+ */
+async function generateForgeRsaKeyPair () {
+  const { privateKey } = await _generateKeyPair('rsa', { modulusLength: 2048 })
+  const privateKeyDer = privateKey.export({ type: 'pkcs1', format: 'der' })
+  const forgePrivateKey = pki.privateKeyFromAsn1(forge.asn1.fromDer(forge.util.createBuffer(privateKeyDer)))
+  const forgePublicKey = pki.rsa.setPublicKey(forgePrivateKey.n, forgePrivateKey.e)
+  return { privateKey: forgePrivateKey, publicKey: forgePublicKey }
+}
 
 // const os = require('os')
 // let username = 'dev-sidecar'
@@ -16,50 +31,48 @@ const pki = forge.pki
 //   const user = os.userInfo()
 //   username = user.username
 // } catch (e) {
-//   console.log('get userinfo error', e)
+//   log.info('get userinfo error', e)
 // }
 
 utils.createCA = function (CN) {
   const keys = pki.rsa.generateKeyPair(2048)
   const cert = pki.createCertificate()
   cert.publicKey = keys.publicKey
-  cert.serialNumber = (new Date()).getTime() + ''
-  cert.validity.notBefore = new Date(new Date() - (60 * 60 * 1000))
+  cert.serialNumber = `${Date.now()}`
+  cert.validity.notBefore = new Date(Date.now() - (60 * 60 * 1000))
   cert.validity.notAfter = new Date()
   cert.validity.notAfter.setFullYear(cert.validity.notAfter.getFullYear() + 20)
   const attrs = [{
     name: 'commonName',
-    value: CN
+    value: CN,
   }, {
     name: 'countryName',
-    value: 'CN'
+    value: 'CN',
   }, {
     shortName: 'ST',
-    value: 'GuangDong'
+    value: 'GuangDong',
   }, {
     name: 'localityName',
-    value: 'ShenZhen'
+    value: 'ShenZhen',
   }, {
     name: 'organizationName',
-    value: 'dev-sidecar'
+    value: 'dev-sidecar',
   }, {
     shortName: 'OU',
-    value: 'https://github.com/docmirror/dev-sidecar'
+    value: 'https://github.com/docmirror/dev-sidecar',
   }]
   cert.setSubject(attrs)
   cert.setIssuer(attrs)
   cert.setExtensions([{
     name: 'basicConstraints',
     critical: true,
-    cA: true
-  },
-  {
+    cA: true,
+  }, {
     name: 'keyUsage',
     critical: true,
-    keyCertSign: true
-  },
-  {
-    name: 'subjectKeyIdentifier'
+    keyCertSign: true,
+  }, {
+    name: 'subjectKeyIdentifier',
   }])
 
   // self-sign certificate
@@ -67,7 +80,7 @@ utils.createCA = function (CN) {
 
   return {
     key: keys.privateKey,
-    cert: cert
+    cert,
   }
 }
 
@@ -76,34 +89,43 @@ utils.covertNodeCertToForgeCert = function (originCertificate) {
   return forge.pki.certificateFromAsn1(obj)
 }
 
-utils.createFakeCertificateByDomain = function (caKey, caCert, domain) {
-  const keys = pki.rsa.generateKeyPair(2048)
+utils.createFakeCertificateByDomain = async function (caKey, caCert, domain, mappingHostNames) {
+  // 作用域名
+  const altNames = []
+  mappingHostNames.forEach((mappingHostName) => {
+    altNames.push({
+      type: 2, // 1=电子邮箱、2=DNS名称
+      value: mappingHostName,
+    })
+  })
+
+  const keys = await generateForgeRsaKeyPair()
   const cert = pki.createCertificate()
   cert.publicKey = keys.publicKey
 
-  cert.serialNumber = (new Date()).getTime() + ''
+  cert.serialNumber = `${Date.now()}`
   cert.validity.notBefore = new Date()
   cert.validity.notBefore.setFullYear(cert.validity.notBefore.getFullYear() - 1)
   cert.validity.notAfter = new Date()
   cert.validity.notAfter.setFullYear(cert.validity.notAfter.getFullYear() + 1)
   const attrs = [{
     name: 'commonName',
-    value: domain
+    value: domain,
   }, {
     name: 'countryName',
-    value: 'CN'
+    value: 'CN',
   }, {
     shortName: 'ST',
-    value: 'GuangDong'
+    value: 'GuangDong',
   }, {
     name: 'localityName',
-    value: 'ShenZhen'
+    value: 'ShenZhen',
   }, {
     name: 'organizationName',
-    value: 'dev-sidecar'
+    value: 'dev-sidecar',
   }, {
     shortName: 'OU',
-    value: 'https://github.com/docmirror/dev-sidecar'
+    value: 'https://github.com/docmirror/dev-sidecar',
   }]
 
   cert.setIssuer(caCert.subject.attributes)
@@ -112,7 +134,7 @@ utils.createFakeCertificateByDomain = function (caKey, caCert, domain) {
   cert.setExtensions([{
     name: 'basicConstraints',
     critical: true,
-    cA: false
+    cA: false,
   },
   // {
   //   name: 'keyUsage',
@@ -129,37 +151,31 @@ utils.createFakeCertificateByDomain = function (caKey, caCert, domain) {
   // },
   {
     name: 'subjectAltName',
-    altNames: [{
-      type: 2,
-      value: domain
-    }]
-  },
-  {
-    name: 'subjectKeyIdentifier'
-  },
-  {
+    altNames,
+  }, {
+    name: 'subjectKeyIdentifier',
+  }, {
     name: 'extKeyUsage',
     serverAuth: true,
     clientAuth: true,
     codeSigning: true,
     emailProtection: true,
-    timeStamping: true
-  },
-  {
-    name: 'authorityKeyIdentifier'
+    timeStamping: true,
+  }, {
+    name: 'authorityKeyIdentifier',
   }])
   cert.sign(caKey, forge.md.sha256.create())
 
   return {
     key: keys.privateKey,
-    cert: cert
+    cert,
   }
 }
 
-utils.createFakeCertificateByCA = function (caKey, caCert, originCertificate) {
+utils.createFakeCertificateByCA = async function (caKey, caCert, originCertificate) {
   const certificate = utils.covertNodeCertToForgeCert(originCertificate)
 
-  const keys = pki.rsa.generateKeyPair(2048)
+  const keys = await generateForgeRsaKeyPair()
   const cert = pki.createCertificate()
   cert.publicKey = keys.publicKey
 
@@ -178,9 +194,8 @@ utils.createFakeCertificateByCA = function (caKey, caCert, originCertificate) {
   cert.setExtensions([{
     name: 'basicConstraints',
     critical: true,
-    cA: false
-  },
-  {
+    cA: false,
+  }, {
     name: 'keyUsage',
     critical: true,
     digitalSignature: true,
@@ -191,44 +206,49 @@ utils.createFakeCertificateByCA = function (caKey, caCert, originCertificate) {
     keyCertSign: true,
     cRLSign: true,
     encipherOnly: true,
-    decipherOnly: true
-  },
-  {
+    decipherOnly: true,
+  }, {
     name: 'subjectAltName',
-    altNames: subjectAltName.altNames
-  },
-  {
-    name: 'subjectKeyIdentifier'
-  },
-  {
+    altNames: subjectAltName.altNames,
+  }, {
+    name: 'subjectKeyIdentifier',
+  }, {
     name: 'extKeyUsage',
     serverAuth: true,
     clientAuth: true,
     codeSigning: true,
     emailProtection: true,
-    timeStamping: true
-  },
-  {
-    name: 'authorityKeyIdentifier'
+    timeStamping: true,
+  }, {
+    name: 'authorityKeyIdentifier',
   }])
   cert.sign(caKey, forge.md.sha256.create())
 
   return {
     key: keys.privateKey,
-    cert: cert
+    cert,
   }
 }
 
 utils.isBrowserRequest = function (userAgent) {
   return /Mozilla/i.test(userAgent)
 }
+
 //
 //  /^[^.]+\.a\.com$/.test('c.a.com')
 //
+const mappingHostNameRegexpCache = {}
 utils.isMappingHostName = function (DNSName, hostname) {
-  let reg = DNSName.replace(/\./g, '\\.').replace(/\*/g, '[^.]+')
-  reg = '^' + reg + '$'
-  return (new RegExp(reg)).test(hostname)
+  if (DNSName === hostname) {
+    return true
+  }
+
+  let regexp = mappingHostNameRegexpCache[DNSName]
+  if (!regexp) {
+    const regStr = `^${DNSName.replace(/\./g, '\\.').replace(/\*/g, '[^.]+')}$`
+    regexp = mappingHostNameRegexpCache[DNSName] = new RegExp(regStr)
+  }
+  return regexp.test(hostname)
 }
 
 utils.getMappingHostNamesFromCert = function (cert) {
@@ -249,25 +269,31 @@ utils.initCA = function ({ caCertPath, caKeyPath }) {
     return {
       caCertPath,
       caKeyPath,
-      create: false
+      create: false,
     }
-  } catch (e) {
-    const caObj = utils.createCA(config.caName)
+  } catch (e0) {
+    log.info('证书文件不存在，重新生成:', e0)
 
-    const caCert = caObj.cert
-    const cakey = caObj.key
+    try {
+      const caObj = utils.createCA(config.caName)
 
-    const certPem = pki.certificateToPem(caCert)
-    const keyPem = pki.privateKeyToPem(cakey)
+      const caCert = caObj.cert
+      const cakey = caObj.key
 
-    mkdirp.sync(path.dirname(caCertPath))
-    fs.writeFileSync(caCertPath, certPem)
-    fs.writeFileSync(caKeyPath, keyPem)
-    log.info('生成证书文件成功，共2个文件:', caCertPath, caKeyPath)
+      const certPem = pki.certificateToPem(caCert)
+      const keyPem = pki.privateKeyToPem(cakey)
+      fs.mkdirSync(path.dirname(caCertPath), { recursive: true })
+      fs.writeFileSync(caCertPath, certPem)
+      fs.writeFileSync(caKeyPath, keyPem)
+      log.info('生成证书文件成功，共2个文件:', caCertPath, caKeyPath)
+    } catch (e) {
+      log.error('生成证书文件失败:', caCertPath, caKeyPath, ', error:', e)
+      throw e
+    }
   }
   return {
     caCertPath,
     caKeyPath,
-    create: true
+    create: true,
   }
 }

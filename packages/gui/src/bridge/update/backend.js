@@ -1,21 +1,40 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import DevSidecar from '@docmirror/dev-sidecar'
+import AdmZip from 'adm-zip'
 import { ipcMain } from 'electron'
-import { autoUpdater } from 'electron-updater'
-import path from 'path'
+import electronUpdater from 'electron-updater'
+const { autoUpdater } = electronUpdater
 import request from 'request'
 import progress from 'request-progress'
-import fs from 'fs'
-import AdmZip from 'adm-zip'
-import log from '../../utils/util.log'
-import appPathUtil from '../../utils/util.apppath'
-import pkg from '../../../package.json'
-import DevSidecar from '@docmirror/dev-sidecar'
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const pkg = require('../../../package.json')
+import appPathUtil from '../../utils/util.apppath.js'
+import log from '../../utils/util.log.gui.js'
+import { isNewVersion } from '@docmirror/dev-sidecar/src/utils/util.version.js'
 
-// eslint-disable-next-line no-unused-vars
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isMac = process.platform === 'darwin'
 const isLinux = process.platform === 'linux'
 
 const curVersion = pkg.version
-const isPreRelease = curVersion.includes('-')
+const isCurrentPreRelease = curVersion.includes('-')
+
+function extractVersion (versionData) {
+  const candidates = [versionData.tag_name, versionData.name]
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue
+    }
+    const matched = candidate.match(/^v?(\d+(?:\.\d+)+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/)
+    if (matched) {
+      return matched[0].startsWith('v') ? matched[0].substring(1) : matched[0]
+    }
+  }
+  return null
+}
 
 function downloadFile (uri, filePath, onProgress, onSuccess, onError) {
   log.info('download url', uri)
@@ -24,86 +43,24 @@ function downloadFile (uri, filePath, onProgress, onSuccess, onError) {
     // delay: 1000,                       // Only start to emit after 1000ms delay, defaults to 0ms
     // lengthHeader: 'x-transfer-length'  // Length header to use, defaults to content-length
   })
-    .on('progress', function (state) {
+    .on('progress', (state) => {
       onProgress(state.percent * 100)
       log.log('progress', state.percent)
     })
-    .on('error', function (err) {
+    .on('error', (err) => {
       // Do something with err
       log.error('下载升级包失败:', err)
       onError(err)
     })
-    .on('end', function () {
+    .on('end', () => {
       // Do something after request finishes
       onSuccess()
     })
     .pipe(fs.createWriteStream(filePath))
 }
 
-function parseVersion (version) {
-  const matched = version.match(/^v?(\d+\.\d+\.\d+)(.*)$/)
-  const versionArr = matched[1].split('.')
-  return {
-    major: parseInt(versionArr[0]),
-    minor: parseInt(versionArr[1]),
-    patch: parseInt(versionArr[2]),
-    suffix: matched[2]
-  }
-}
-
-/**
- * 比较版本号
- *
- * @param version     线上版本号
- * @param curVersion  当前版本号
- * @returns {number} 比较线上版本号是否为更新版本，1=是|0=相等|-1=否|-99=出现异常，比较结果未知
- */
-function isNewVersion (version, curVersion) {
-  if (version === curVersion) {
-    return 0
-  }
-
-  try {
-    const versionObj = parseVersion(version)
-    const curVersionObj = parseVersion(curVersion)
-    if (versionObj.major > curVersionObj.major) {
-      return 1 // 大版本号更大，为更新版本
-    }
-
-    if (curVersionObj.major === versionObj.major) {
-      if (versionObj.minor > curVersionObj.minor) {
-        return 2 // 中版本号更大，为更新版本
-      }
-
-      if (curVersionObj.minor === versionObj.minor) {
-        if (versionObj.patch > curVersionObj.patch) {
-          return 3 // 小版本号更大，为更新版本
-        }
-
-        if (versionObj.patch === curVersionObj.patch) {
-          if (versionObj.suffix && curVersionObj.suffix) {
-            // 当两个后缀版本号都存在时，直接比较后缀版本号字符串的大小
-            if (versionObj.suffix > curVersionObj.suffix) {
-              return 41
-            }
-          } else if (!versionObj.suffix && curVersionObj.suffix) {
-            // 线上版本号没有后缀版本号，说明为正式版本，为更新版本
-            return 42
-          }
-        }
-      }
-    }
-  } catch (e) {
-    log.error(`比对版本失败，当前版本号：${curVersion}，比对版本号：${version}, error:`, e)
-    return -99
-  }
-  return -1
-}
-
 /**
  * 检测更新，在你想要检查更新的时候执行，renderer事件触发后的操作自行编写
- *
- * @param win win是所有窗口的引用
  */
 function updateHandle (app, api, win, beforeQuit, quit, log) {
   // // 更新前，删除本地安装包 ↓
@@ -115,7 +72,7 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
     error: '更新失败',
     checking: '检查更新中',
     updateAva: '发现新版本',
-    updateNotAva: '当前为最新版本，无需更新'
+    updateNotAva: '当前为最新版本，无需更新',
   }
   // 本地开发环境，改变app-update.yml地址
   if (process.env.NODE_ENV === 'development') {
@@ -141,11 +98,11 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
   // 检查更新
   const releasesApiUrl = 'https://api.github.com/repos/docmirror/dev-sidecar/releases'
   async function checkForUpdatesFromGitHub () {
-    request(releasesApiUrl, { headers: { 'User-Agent': 'DS/' + curVersion, 'Server-Name': 'baidu.com' } }, (error, response, body) => {
+    request(releasesApiUrl, { headers: { 'User-Agent': `DS/${curVersion}`, 'Server-Name': 'baidu.com' } }, (error, response, body) => {
       try {
         if (error) {
           log.error('检查更新失败:', error)
-          const errorMsg = '检查更新失败：' + error
+          const errorMsg = `检查更新失败：${error}`
           win.webContents.send('update', { key: 'error', action: 'checkForUpdate', error: errorMsg })
           return
         }
@@ -160,7 +117,7 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
           let data
           try {
             data = JSON.parse(body)
-          } catch (e) {
+          } catch {
             log.error('检查更新失败，github API返回数据格式不正确:', body)
             win.webContents.send('update', { key: 'error', action: 'checkForUpdate', error: '检查更新失败，github API返回数据格式不正确' })
             return
@@ -172,43 +129,56 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
             return
           }
 
-          // log.info('github api返回的release数据：', JSON.stringify(data, null, '\t'))
+          log.debug('github api返回的release数据：', JSON.stringify(data, null, '\t'))
 
           // 检查更新
           for (let i = 0; i < data.length; i++) {
             const versionData = data[i]
 
+            // log.debug('版本数据：', versionData)
+
             if (!versionData.assets || versionData.assets.length === 0) {
+              log.info('跳过空版本，即未上传过安装包：', versionData.name)
               continue // 跳过空版本，即未上传过安装包
             }
-            if (!isPreRelease && DevSidecar.api.config.get().app.skipPreRelease && versionData.name.includes('-')) {
+            const onlineVersion = extractVersion(versionData)
+            if (!onlineVersion) {
+              log.info('跳过无法提取版本号的版本:', versionData.name || versionData.tag_name)
+              continue // 跳过即 “不是正式，又不是预发布” 的版本
+            }
+
+            const isOnlinePreRelease = onlineVersion.includes('-') || versionData.prerelease
+            if (!isCurrentPreRelease && DevSidecar.api.config.get().app.skipPreRelease && isOnlinePreRelease) {
+              log.info('跳过预发布版本:', versionData.name, ', onlineVersion:', onlineVersion)
               continue // 跳过预发布版本
             }
 
-            // log.info('最近正式版本数据：', versionData)
-
-            // 获取版本号
-            let version = versionData.name
-            if (version.indexOf('v') === 0) {
-              version = version.substring(1)
-            }
+            log.info('最近可用版本：', versionData.name, ', onlineVersion:', onlineVersion)
 
             // 比对版本号，是否为新版本
-            const isNew = isNewVersion(version, curVersion)
-            log.info(`版本比对结果：isNewVersion('${version}', '${curVersion}') = ${isNew}`)
+            const isNew = isNewVersion(onlineVersion, curVersion, log)
+            log.info(`版本比对结果：isNewVersion('${onlineVersion}', '${curVersion}') = ${isNew}`)
             if (isNew > 0) {
-              log.info(`检查更新：发现新版本 '${version}'，当前版本号为 '${curVersion}'`)
+              log.info(`检查更新：发现新版本 '${onlineVersion}'，当前版本号为 '${curVersion}'`)
+
+              // 查找当前平台+架构对应的增量更新包
+              const arch = process.arch === 'ia32' ? 'ia32' : process.arch === 'arm64' ? 'arm64' : 'x64'
+              const platformPrefix = isMac ? `update-mac-${arch}-` : isLinux ? `update-linux-${arch}-` : `update-win-${arch}-`
+              const partAsset = versionData.assets.find(a => a.name && a.name.startsWith(platformPrefix) && a.name.endsWith('.zip'))
+              const partPackage = partAsset ? partAsset.browser_download_url : null
+
               win.webContents.send('update', {
                 key: 'available',
                 value: {
-                  version,
+                  version: onlineVersion,
                   releaseNotes: versionData.body
-                    ? (versionData.body.replace(/\r\n/g, '\n').replace(/https:\/\/github.com\/docmirror\/dev-sidecar/g, '').replace(/(?<=(^|\n))[ \t]*[ #]*#\s*/g, '') || '无')
-                    : '无'
-                }
+                    ? (versionData.body.replace(/\r\n/g, '\n').replace(/https:\/\/github.com\/docmirror\/dev-sidecar/g, '').replace(/(?<=(^|\n))[ \t]*(?:#[ #]*)?#\s*/g, '') || '无')
+                    : '无',
+                  partPackage,
+                },
               })
             } else {
-              log.info(`检查更新：没有新版本，最近发布的版本号为 '${version}'，而当前版本号为 '${curVersion}'`)
+              log.info(`检查更新：没有新版本，最近发布的版本号为 '${onlineVersion}'，而当前版本号为 '${curVersion}'`)
               win.webContents.send('update', { key: 'notAvailable' })
             }
 
@@ -223,21 +193,33 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
           let bodyObj
           try {
             bodyObj = JSON.parse(body)
-          } catch (e) {
+          } catch {
             bodyObj = null
           }
 
+          let detail = bodyObj && bodyObj.message ? bodyObj.message : ''
+          if (!detail) {
+            // 尝试从 DS 的 HTML 错误页面提取错误描述
+            const titleMatch = typeof body === 'string' && body.match(/<title>([^<]*)<\/title>/i)
+            if (titleMatch) {
+              detail = titleMatch[1]
+            } else if (response && response.statusMessage) {
+              detail = response.statusMessage
+            } else if (typeof body === 'string') {
+              detail = body.substring(0, 200)
+            }
+          }
           let message
           if (response) {
-            message = '检查更新失败: ' + (bodyObj && bodyObj.message ? bodyObj.message : response.message) + ', code: ' + response.statusCode
+            message = `检查更新失败: ${detail}, code: ${response.statusCode}`
           } else {
-            message = '检查更新失败: ' + (bodyObj && bodyObj.message ? bodyObj.message : body)
+            message = `检查更新失败: ${detail || body}`
           }
           win.webContents.send('update', { key: 'error', action: 'checkForUpdate', error: message })
         }
       } catch (e) {
         log.error('检查更新失败:', e)
-        win.webContents.send('update', { key: 'error', action: 'checkForUpdate', error: '检查更新失败:' + e.message })
+        win.webContents.send('update', { key: 'error', action: 'checkForUpdate', error: `检查更新失败:${e.message}` })
       }
     })
   }
@@ -249,13 +231,13 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
     log.info('download dir:', fileDir)
     try {
       fs.accessSync(fileDir, fs.constants.F_OK)
-    } catch (e) {
+    } catch {
       fs.mkdirSync(fileDir)
     }
-    const filePath = path.join(fileDir, value.version + '.zip')
+    const filePath = path.join(fileDir, `${value.version}.zip`)
 
     downloadFile(value.partPackage, filePath, (data) => {
-      win.webContents.send('update', { key: 'progress', value: parseInt(data) })
+      win.webContents.send('update', { key: 'progress', value: Number.parseInt(data) })
     }, () => {
       // 文件下载完成
       win.webContents.send('update', { key: 'progress', value: 100 })
@@ -263,10 +245,10 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
       partPackagePath = filePath
       win.webContents.send('update', {
         key: 'downloaded',
-        value: value
+        value,
       })
     }, (error) => {
-      sendUpdateMessage({ key: 'error', value: error, error: error })
+      sendUpdateMessage({ key: 'error', value: error, error })
     })
   }
 
@@ -294,34 +276,34 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
     }
   }
 
-  autoUpdater.on('error', function (error) {
+  autoUpdater.on('error', (error) => {
     log.warn('autoUpdater error:', error)
-    sendUpdateMessage({ key: 'error', value: error, error: error })
+    sendUpdateMessage({ key: 'error', value: error, error })
     // dialog.showErrorBox('Error: ', error == null ? 'unknown' : (error.stack || error).toString())
   })
-  autoUpdater.on('checking-for-update', function () {
+  autoUpdater.on('checking-for-update', () => {
     log.info('autoUpdater checking-for-update')
     sendUpdateMessage({ key: 'checking', value: message.checking })
   })
-  autoUpdater.on('update-available', function (info) {
+  autoUpdater.on('update-available', (info) => {
     log.info('autoUpdater update-available')
     sendUpdateMessage({ key: 'available', value: info })
   })
-  autoUpdater.on('update-not-available', function () {
+  autoUpdater.on('update-not-available', () => {
     log.info('autoUpdater update-not-available')
     sendUpdateMessage({ key: 'notAvailable', value: message.updateNotAva })
   })
   // 更新下载进度
-  autoUpdater.on('download-progress', function (progressObj) {
+  autoUpdater.on('download-progress', (progressObj) => {
     log.info('autoUpdater download-progress')
-    win.webContents.send('update', { key: 'progress', value: parseInt(progressObj.percent) })
+    win.webContents.send('update', { key: 'progress', value: Number.parseInt(progressObj.percent) })
   })
   // 更新完成，重启应用
-  autoUpdater.on('update-downloaded', function (info) {
+  autoUpdater.on('update-downloaded', (info) => {
     log.info('download complete, version:', info.version)
     win.webContents.send('update', {
       key: 'downloaded',
-      value: info
+      value: info,
     })
   })
 
@@ -374,9 +356,9 @@ export default {
       Object.defineProperty(app, 'isPackaged', {
         get () {
           return true
-        }
+        },
       })
     }
     updateHandle(app, api, win, beforeQuit, quit, log)
-  }
+  },
 }

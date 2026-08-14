@@ -22,13 +22,13 @@ function getTomorrow () {
 // }
 
 const AipOcrClient = require('baidu-aip-sdk').ocr
+
 const AipOcrClientMap = {}
 const apis = [
   'accurateBasic', // 调用通用文字识别（高精度版）
   'accurate', // 调用通用文字识别（含位置高精度版）
-  'handwriting' // 手写文字识别
+  'handwriting', // 手写文字识别
 ]
-
 const limitMap = {}
 
 function createBaiduOcrClient (config) {
@@ -47,7 +47,7 @@ function getConfig (interceptOpt, tryCount, log) {
   tryCount = tryCount || 1
 
   let config
-  if (typeof (interceptOpt.baiduOcr) && interceptOpt.baiduOcr.length > 0) {
+  if (Array.isArray(interceptOpt.baiduOcr) && interceptOpt.baiduOcr.length > 0) {
     config = interceptOpt.baiduOcr[count++ % interceptOpt.baiduOcr.length]
 
     if (tryCount < interceptOpt.baiduOcr.length) {
@@ -57,7 +57,9 @@ function getConfig (interceptOpt, tryCount, log) {
     }
 
     // 避免count值过大，造成问题
-    if (count >= 100000) count = 0
+    if (count >= 100000) {
+      count = 0
+    }
   } else {
     config = interceptOpt.baiduOcr
     tryCount = null // 将tryCount设置为null代表只有一个配置
@@ -67,18 +69,20 @@ function getConfig (interceptOpt, tryCount, log) {
     return null // 没有配置或配置错误，直接返回null
   }
 
-  // 获取当前配置可用的API
+  // 选择当前配置可用的API。
+  // 注意：不将结果写入共享的 config 对象，而是作为局部变量返回，避免并发请求互相覆盖。
+  let selectedApi = null
   for (let i = 0; i < apis.length; i++) {
     const api = apis[i]
     if (!checkIsLimitConfig(config.id, api)) {
-      config.api = api
+      selectedApi = api
       break
     }
     log.warn(`百度云账号 ${config.id} 的接口 ${api} 已超出限额`)
   }
 
   // 如果当前配置的所有API均不可用，则返回null
-  if (config.api == null) {
+  if (selectedApi == null) {
     if (tryCount == null) {
       return null // 只配置了一个账号，没有更多账号可以选择了，直接返回null
     } else {
@@ -91,17 +95,17 @@ function getConfig (interceptOpt, tryCount, log) {
     }
   }
 
-  return config
+  return { config, api: selectedApi }
 }
 
 function limitConfig (id, api) {
-  const key = id + '_' + api
+  const key = `${id}_${api}`
   limitMap[key] = getTomorrow()
   // limitMap[key] = Date.now() + 5000 // 测试用，5秒后解禁
 }
 
 function checkIsLimitConfig (id, api) {
-  const key = id + '_' + api
+  const key = `${id}_${api}`
   const limitTime = limitMap[key]
   return limitTime && limitTime > Date.now()
 }
@@ -109,22 +113,29 @@ function checkIsLimitConfig (id, api) {
 module.exports = {
   name: 'baiduOcr',
   priority: 131,
-  requestIntercept (context, interceptOpt, req, res, ssl, next, matched) {
+  requestIntercept (context, interceptOpt, req, res, ssl, next) {
     const { rOptions, log } = context
 
     const headers = {
       'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*'
     }
 
-    // 获取配置
-    const config = getConfig(interceptOpt, null, log)
-    if (!config) {
+    if (rOptions.headers.origin) {
+      headers['Access-Control-Allow-Credentials'] = 'true'
+      headers['Access-Control-Allow-Origin'] = rOptions.headers.origin
+    }
+
+    // 获取配置（api 由 getConfig 以局部变量形式返回，不写入共享配置对象，并发安全）
+    const configResult = getConfig(interceptOpt, null, log)
+    if (!configResult) {
       res.writeHead(200, headers)
       res.write('{"error_code": 99917, "error_msg": "dev-sidecar中，未配置百度云账号，或所有百度云账号的免费额度都已用完！！！"}')
       res.end()
       return true
     }
+    let { config, api } = configResult
+    api = api || apis[0]
+
     if (!config.id || !config.ak || !config.sk) {
       res.writeHead(200, headers)
       res.write('{"error_code": 999500, "error_msg": "dev-sidecar中，baiduOcr的 id 或 ak 或 sk 配置为空"}')
@@ -132,7 +143,7 @@ module.exports = {
       return true
     }
 
-    headers['DS-Interceptor'] = `baiduOcr: id=${config.id}, api=${config.api || apis[0]}, account=${config.account}`
+    headers['DS-Interceptor'] = `baiduOcr: id=${config.id}, api=${api}, account=${config.account}`
 
     // 获取图片的base64编码
     let imageBase64 = rOptions.path.substring(rOptions.path.indexOf('?') + 1)
@@ -144,23 +155,23 @@ module.exports = {
     }
     imageBase64 = decodeURIComponent(imageBase64)
 
-    // 调用百度云 “文字识别” 相关接口，根据 `config.api` 调用不同的接口
+    // 调用百度云 "文字识别" 相关接口，根据 `api` 调用不同的接口
     const client = createBaiduOcrClient(config)
     const options = {
       recognize_granularity: 'big',
       detect_direction: 'false',
       paragraph: 'false',
       probability: 'false',
-      ...(config.options || {})
+      ...(config.options || {}),
     }
     log.info('发起百度ocr请求', req.hostname)
-    client[config.api || apis[0]](imageBase64, options).then(function (result) {
+    client[api](imageBase64, options).then((result) => {
       if (result.error_code != null) {
         log.error('baiduOcr error:', result)
         if (result.error_code === 17) {
           // 当前百度云账号，达到当日调用次数上限
-          limitConfig(config.id, config.api)
-          log.error(`当前百度云账号的接口 ${config.api}，已达到当日调用次数上限，暂时禁用它，明天会自动放开:`, config)
+          limitConfig(config.id, api)
+          log.error(`当前百度云账号的接口 ${api}，已达到当日调用次数上限，暂时禁用它，明天会自动放开:`, config)
         }
       } else {
         log.info('baiduOcr success:', result)
@@ -169,13 +180,17 @@ module.exports = {
       res.writeHead(200, headers)
       res.write(JSON.stringify(result)) // 格式如：{"words_result":[{"words":"6525"}],"words_result_num":1,"log_id":1818877093747960000}
       res.end()
-      if (next) next() // 异步执行完继续next
-    }).catch(function (err) {
-      log.info('baiduOcr error:', err)
+      if (next) {
+        next() // 异步执行完继续next
+      }
+    }).catch((err) => {
+      log.error('baiduOcr error:', err)
       res.writeHead(200, headers)
-      res.write('{"error_code": 999500, "error_msg": "' + err + '"}') // 格式如：{"words_result":[{"words":"6525"}],"words_result_num":1,"log_id":1818877093747960000}
+      res.write(`{"error_code": 999500, "error_msg": "${err}"}`) // 格式如：{"words_result":[{"words":"6525"}],"words_result_num":1,"log_id":1818877093747960000}
       res.end()
-      if (next) next() // 异步执行完继续next
+      if (next) {
+        next() // 异步执行完继续next
+      }
     })
 
     log.info('proxy baiduOcr: hostname:', req.hostname)
@@ -184,5 +199,5 @@ module.exports = {
   },
   is (interceptOpt) {
     return !!interceptOpt.baiduOcr
-  }
+  },
 }

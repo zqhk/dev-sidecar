@@ -1,16 +1,18 @@
-const status = require('./status')
-const config = require('./config')
-const event = require('./event')
-const shell = require('./shell')
-const modules = require('./modules')
 const lodash = require('lodash')
-const log = require('./utils/util.log')
+const config = require('./config-api')
+const event = require('./event')
+const modules = require('./modules')
+const shell = require('./shell')
+const status = require('./status')
+const instance = require('./modules/instance')
+const log = require('./utils/util.log.core')
+
 const context = {
   config,
   shell,
   status,
   event,
-  log
+  log,
 }
 
 function setupPlugin (key, plugin, context, config) {
@@ -29,27 +31,44 @@ const proxy = setupPlugin('proxy', modules.proxy, context, config)
 const plugin = {}
 for (const key in modules.plugin) {
   const target = modules.plugin[key]
-  const api = setupPlugin('plugin.' + key, target, context, config)
+  if (target == null) {
+    // 插件不可用（如 SEA 独立可执行文件中无法携带 free-eye），注册为禁用状态
+    log.warn(`插件【${key}】不可用，已注册为禁用状态`)
+    const stub = {
+      config: { key, enabled: false },
+      status: { enabled: false },
+      plugin: () => ({
+        start: async () => log.warn(`插件【${key}】不可用，无法启动`),
+        stop: async () => {},
+        close: async () => {},
+        run: async () => { throw new Error(`插件【${key}】不可用`) },
+      }),
+    }
+    const stubApi = setupPlugin(`plugin.${key}`, stub, context, config)
+    plugin[key] = stubApi
+    continue
+  }
+  const api = setupPlugin(`plugin.${key}`, target, context, config)
   plugin[key] = api
 }
 config.resetDefault()
 const server = modules.server
 const serverStart = server.start
 
-const newServerStart = ({ mitmproxyPath }) => {
+function newServerStart ({ mitmproxyPath }) {
   return serverStart({ mitmproxyPath, plugins: plugin })
 }
 server.start = newServerStart
 async function startup ({ mitmproxyPath }) {
   const conf = config.get()
-  if (conf.server.enabled) {
+  if (conf.server.enabled && !status.server.enabled) {
     try {
       await server.start({ mitmproxyPath })
     } catch (err) {
       log.error('代理服务启动失败：', err)
     }
   }
-  if (conf.proxy.enabled) {
+  if (conf.proxy.enabled && !status.proxy.enabled) {
     try {
       await proxy.start()
     } catch (err) {
@@ -59,7 +78,7 @@ async function startup ({ mitmproxyPath }) {
   try {
     const plugins = []
     for (const key in plugin) {
-      if (conf.plugin[key].enabled) {
+      if (conf.plugin[key].enabled && !status.plugin[key]?.enabled) {
         const start = async () => {
           try {
             await plugin[key].start()
@@ -126,7 +145,7 @@ const api = {
   status: {
     get () {
       return status
-    }
+    },
   },
   config,
   event,
@@ -134,9 +153,10 @@ const api = {
   server,
   proxy,
   plugin,
-  log
+  instance,
+  log,
 }
 module.exports = {
   status,
-  api
+  api,
 }

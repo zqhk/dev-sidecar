@@ -1,113 +1,266 @@
-const https = require('https')
-const tlsUtils = require('./tlsUtils')
-const CertAndKeyContainer = require('./CertAndKeyContainer')
+const http2 = require('node:http2')
+const tls = require('node:tls')
 const forge = require('node-forge')
+const { LRUCache } = require('lru-cache')
+const CertAndKeyContainer = require('./CertAndKeyContainer')
+const log = require('../../../utils/util.log.server')
+const compatible = require('../compatible/compatible')
+
 const pki = forge.pki
-// const colors = require('colors')
-const tls = require('tls')
-const log = require('../../../utils/util.log')
+
+// IPv4地址检测正则，提前编译，避免在 getDnsName 中重复创建。
+// 不使用 /g 标志：此处只做存在性检测（.test()），无需记录 lastIndex 状态。
+const IPv4_RE = /\b(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)\b){3}/
+
+// 获取DNS名称
+function getDnsName (hostname) {
+  if (!hostname.includes('.')) {
+    return hostname // 可能是IPv6地址，直接返回
+  }
+
+  // 判断是否为IP
+  if (IPv4_RE.test(hostname)) {
+    return hostname // 为IP，直接返回
+  }
+
+  // 判断是否是一级域名
+  if (hostname.indexOf('.') === hostname.lastIndexOf('.')) {
+    return `*.${hostname}`
+  }
+
+  // 获取域名
+  return `*${hostname.substring(hostname.indexOf('.'))}`
+}
+
+const DEFAULT_MAX_LENGTH = 256
+
 module.exports = class FakeServersCenter {
-  constructor ({ maxLength = 256, requestHandler, upgradeHandler, caCert, caKey, getCertSocketTimeout }) {
-    this.queue = []
-    this.maxLength = maxLength
+  constructor ({
+    maxLength = DEFAULT_MAX_LENGTH,
+    requestHandler,
+    upgradeHandler,
+    caCert,
+    caKey,
+  }) {
+    // 缓存键格式：`${dnsName}:${port}:${ssl}`
+    this.cache = new LRUCache({
+      maxSize: maxLength > 0 ? maxLength : DEFAULT_MAX_LENGTH,
+      sizeCalculation: () => {
+        return 1
+      },
+      dispose: (evictServerPromiseObj, evictDnsName) => {
+        try {
+          evictServerPromiseObj.serverObj.server.close()
+          log.info(`旧fake服务缓存被移除，停止服务成功，${evictDnsName}`)
+        } catch (e) {
+          log.error(`旧fake服务缓存被移除，但停止服务失败，${evictDnsName} ->`, evictServerPromiseObj, `, error:`, e)
+        }
+      },
+    })
     this.requestHandler = requestHandler
     this.upgradeHandler = upgradeHandler
     this.certAndKeyContainer = new CertAndKeyContainer({
-      getCertSocketTimeout,
+      maxLength: maxLength > 0 ? maxLength : DEFAULT_MAX_LENGTH,
       caCert,
-      caKey
+      caKey,
     })
   }
 
   addServerPromise (serverPromiseObj) {
-    if (this.queue.length >= this.maxLength) {
-      const delServerObj = this.queue.shift()
-      try {
-        log.info('超过最大服务数量，删除旧服务。delServerObj:', delServerObj)
-        delServerObj.serverObj.server.close()
-      } catch (e) {
-        log.info('`delServerObj.serverObj.server.close()` error:', e)
-      }
-    }
-    this.queue.push(serverPromiseObj)
-    return serverPromiseObj
+    // 添加缓存
+    this.cache.set(serverPromiseObj.cacheKey, serverPromiseObj)
   }
 
-  getServerPromise (hostname, port) {
-    for (let i = 0; i < this.queue.length; i++) {
-      const serverPromiseObj = this.queue[i]
-      const mappingHostNames = serverPromiseObj.mappingHostNames
-      for (let j = 0; j < mappingHostNames.length; j++) {
-        const DNSName = mappingHostNames[j]
-        if (tlsUtils.isMappingHostName(DNSName, hostname)) {
-          this.reRankServer(i)
-          return serverPromiseObj.promise
-        }
+  getServerPromise (hostname, port, ssl, manualCompatibleConfig) {
+    if (port === 443 || port === 80) {
+      ssl = port === 443
+    } else if (ssl) {
+      // 自动兼容程序：1
+      const compatibleConfig = compatible.getConnectCompatibleConfig(hostname, port, manualCompatibleConfig)
+      if (compatibleConfig && compatibleConfig.ssl != null) {
+        ssl = compatibleConfig.ssl
       }
+    }
+
+    const dnsName = getDnsName(hostname)
+    const cacheKey = `${dnsName}:${port}:${ssl}`
+
+    const cachedServerObj = this.cache.get(cacheKey)
+    if (cachedServerObj) {
+      log.debug(`Load fakeServerPromise from cache, hostname: ${hostname}:${port}, ssl: ${ssl}, serverPromiseObj: {"ssl":${cachedServerObj.ssl},"port":${cachedServerObj.port},"mappingHostNames":${JSON.stringify(cachedServerObj.mappingHostNames)}}`)
+      return cachedServerObj.promise
+    }
+
+    log.info(`getServerPromise, hostname: ${hostname}:${port}, ssl: ${ssl}, protocol: ${ssl ? 'https' : 'http'}`)
+
+    const mappingHostNames = [dnsName]
+    if (dnsName.startsWith('*.')) {
+      mappingHostNames.push(dnsName.replace('*.', ''))
     }
 
     const serverPromiseObj = {
-      mappingHostNames: [hostname] // temporary hostname
+      cacheKey,
+      port,
+      ssl,
+      mappingHostNames,
     }
 
     const promise = new Promise((resolve, reject) => {
       (async () => {
-        const certObj = await this.certAndKeyContainer.getCertPromise(hostname, port)
-        const cert = certObj.cert
-        const key = certObj.key
-        const certPem = pki.certificateToPem(cert)
-        const keyPem = pki.privateKeyToPem(key)
-        const fakeServer = new https.Server({
-          key: keyPem,
-          cert: certPem,
-          SNICallback: (hostname, done) => {
-            (async () => {
-              const certObj = await this.certAndKeyContainer.getCertPromise(hostname, port)
-              log.info(`sni callback: ${hostname}:${port}`)
-              done(null, tls.createSecureContext({
-                key: pki.privateKeyToPem(certObj.key),
-                cert: pki.certificateToPem(certObj.cert)
-              }))
-            })()
-          }
-        })
+        let fakeServer
+        let cert
+        let key
+
+        log.info(`【CreateFakeServer】hostname: ${hostname}:${port}, ssl: ${ssl}, protocol: ${ssl ? 'https' : 'http'}`)
+
+        if (ssl) {
+          const certObj = await this.certAndKeyContainer.getCertPromise(hostname, port, dnsName, mappingHostNames)
+          cert = certObj.cert
+          key = certObj.key
+          const certPem = pki.certificateToPem(cert)
+          const keyPem = pki.privateKeyToPem(key)
+          const secureContext = tls.createSecureContext({ key: keyPem, cert: certPem })
+          fakeServer = http2.createSecureServer({
+            allowHTTP1: true, // 兼容不支持 HTTP/2 的客户端，支持 h2 的浏览器通过 ALPN 自动协商
+            key: keyPem,
+            cert: certPem,
+            SNICallback: (hostname, done) => {
+              log.info(`fakeServer SNICallback: ${hostname}:${port}`)
+              done(null, secureContext)
+            },
+          })
+        } else {
+          fakeServer = http2.createServer({ allowHTTP1: true })
+        }
         const serverObj = {
           cert,
           key,
           server: fakeServer,
-          port: 0 // if prot === 0 ,should listen server's `listening` event.
+          port: 0, // if port === 0 ,should listen server's `listening` event.
         }
         serverPromiseObj.serverObj = serverObj
+
+        let isListening = false
+
+        const printDebugLog = process.env.NODE_ENV === 'development' && false // 开发过程中，如有需要可以将此参数临时改为true，打印所有事件的日志
         fakeServer.listen(0, () => {
           const address = fakeServer.address()
           serverObj.port = address.port
         })
         fakeServer.on('request', (req, res) => {
-          const ssl = true
+          // HTTP/2 使用 :authority 伪头而非 host 头，需补全以兼容下游处理
+          if (!req.headers.host && req.authority) {
+            req.headers.host = req.authority
+          }
+          if (printDebugLog) {
+            log.debug(`【fakeServer request - ${hostname}:${port}】\r\n----- req -----\r\n`, req, '\r\n----- res -----\r\n', res)
+          }
           this.requestHandler(req, res, ssl)
         })
-        fakeServer.on('error', (e) => {
-          log.error('fakeServer error:', e)
-        })
         fakeServer.on('listening', () => {
-          const mappingHostNames = tlsUtils.getMappingHostNamesFromCert(certObj.cert)
-          serverPromiseObj.mappingHostNames = mappingHostNames
+          isListening = true
+          if (printDebugLog) {
+            log.debug(`【fakeServer listening - ${hostname}:${port}】no arguments...`)
+          }
           resolve(serverObj)
         })
         fakeServer.on('upgrade', (req, socket, head) => {
-          const ssl = true
+          if (printDebugLog) {
+            log.debug(`【fakeServer upgrade - ${hostname}:${port}】\r\n----- req -----\r\n`, req, '\r\n----- socket -----\r\n', socket, '\r\n----- head -----\r\n', head)
+          } else {
+            log.info(`【fakeServer upgrade - ${hostname}:${port}】`, req.url)
+          }
           this.upgradeHandler(req, socket, head, ssl)
         })
-      })()
+
+        // 三个 error 事件
+        fakeServer.on('error', (e) => {
+          log.error(`【fakeServer error - ${hostname}:${port}】\r\n----- error -----\r\n`, e)
+          if (!isListening) {
+            reject(e)
+          }
+        })
+        // HTTP/2 会话错误：协议违规、帧错误等
+        fakeServer.on('sessionError', (err, session) => {
+          log.error(`【fakeServer sessionError - ${hostname}:${port}】`, err)
+        })
+        // HTTP/2 会话建立：绑定流错误监听，避免未捕获异常
+        fakeServer.on('session', (session) => {
+          session.on('error', (err) => {
+            log.warn(`【fakeServer session error - ${hostname}:${port}】`, err)
+          })
+          session.on('stream', (stream) => {
+            stream.on('error', (err) => {
+              log.warn(`【fakeServer stream error - ${hostname}:${port}】`, err)
+            })
+          })
+        })
+        fakeServer.on('clientError', (err, _socket) => {
+          // log.error(`【fakeServer clientError - ${hostname}:${port}】\r\n----- error -----\r\n`, err, '\r\n----- socket -----\r\n', socket)
+          log.error(`【fakeServer clientError - ${hostname}:${port}】\r\n`, err)
+
+          // 自动兼容程序：1
+          if (port !== 443 && port !== 80) {
+            if (ssl === true && err.code && err.code.startsWith('ERR_SSL_')) {
+              compatible.setConnectSsl(hostname, port, false)
+              log.error(`自动兼容程序：SSL异常，现设置为禁用ssl: ${hostname}:${port}, ssl = false`)
+            } else if (ssl === false && err.code === 'HPE_INVALID_METHOD') {
+              compatible.setConnectSsl(hostname, port, true)
+              log.error(`自动兼容程序：${err.code}，现设置为启用ssl: ${hostname}:${port}, ssl = true`)
+            }
+          }
+        })
+        if (ssl) {
+          fakeServer.on('tlsClientError', (err, _tlsSocket) => {
+            if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
+              return // 在tlsClientError事件中，以上异常不记录日志
+            }
+            // log.error(`【fakeServer tlsClientError - ${hostname}:${port}】\r\n----- error -----\r\n`, err, '\r\n----- tlsSocket -----\r\n', tlsSocket)
+            log.error(`【fakeServer tlsClientError - ${hostname}:${port}】\r\n`, err)
+          })
+        }
+
+        // 其他监听事件，只打印debug日志
+        if (printDebugLog) {
+          if (ssl) {
+            fakeServer.on('keylog', (line, tlsSocket) => {
+              log.debug(`【fakeServer keylog - ${hostname}:${port}】\r\n----- line -----\r\n`, line, '\r\n----- tlsSocket -----\r\n', tlsSocket)
+            })
+            // fakeServer.on('newSession', (sessionId, sessionData, callback) => {
+            //   log.debug(`【fakeServer newSession - ${hostname}:${port}】\r\n----- sessionId -----\r\n`, sessionId, '\r\n----- sessionData -----\r\n', sessionData, '\r\n----- callback -----\r\n', callback)
+            // })
+            // fakeServer.on('OCSPRequest', (certificate, issuer, callback) => {
+            //   log.debug(`【fakeServer OCSPRequest - ${hostname}:${port}】\r\n----- certificate -----\r\n`, certificate, '\r\n----- issuer -----\r\n', issuer, '\r\n----- callback -----\r\n', callback)
+            // })
+            // fakeServer.on('resumeSession', (sessionId, callback) => {
+            //   log.debug(`【fakeServer resumeSession - ${hostname}:${port}】\r\n----- sessionId -----\r\n`, sessionId, '\r\n----- callback -----\r\n', callback)
+            // })
+            fakeServer.on('secureConnection', (tlsSocket) => {
+              log.debug(`【fakeServer secureConnection - ${hostname}:${port}】\r\n----- tlsSocket -----\r\n`, tlsSocket)
+            })
+          }
+          fakeServer.on('close', () => {
+            log.debug(`【fakeServer close - ${hostname}:${port}】no arguments...`)
+          })
+          fakeServer.on('connection', (socket) => {
+            log.debug(`【fakeServer connection - ${hostname}:${port}】\r\n----- socket -----\r\n`, socket)
+          })
+          fakeServer.on('checkContinue', (req, res) => {
+            log.debug(`【fakeServer checkContinue - ${hostname}:${port}】\r\n----- req -----\r\n`, req, '\r\n----- res -----\r\n', res)
+          })
+          fakeServer.on('checkExpectation', (req, res) => {
+            log.debug(`【fakeServer checkExpectation - ${hostname}:${port}】\r\n----- req -----\r\n`, req, '\r\n----- res -----\r\n', res)
+          })
+          fakeServer.on('connect', (req, socket, head) => {
+            log.debug(`【fakeServer resumeSession - ${hostname}:${port}】\r\n----- req -----\r\n`, req, '\r\n----- socket -----\r\n', socket, '\r\n----- head -----\r\n', head)
+          })
+        }
+      })().catch(reject)
     })
 
     serverPromiseObj.promise = promise
+    this.addServerPromise(serverPromiseObj)
 
-    return (this.addServerPromise(serverPromiseObj)).promise
-  }
-
-  reRankServer (index) {
-    // index ==> queue foot
-    this.queue.push((this.queue.splice(index, 1))[0])
+    return promise
   }
 }

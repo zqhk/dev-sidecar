@@ -1,19 +1,19 @@
-const config = require('../../config')
+const fork = require('node:child_process').fork
+const fs = require('node:fs')
+const path = require('node:path')
+const lodash = require('lodash')
+const config = require('../../config-api')
 const event = require('../../event')
 const status = require('../../status')
-const lodash = require('lodash')
-const fork = require('child_process').fork
-const log = require('../../utils/util.log')
-const fs = require('fs')
-const path = require('path')
 const jsonApi = require('@docmirror/mitmproxy/src/json')
+const log = require('../../utils/util.log.core')
 
 let server = null
 function fireStatus (status) {
   event.fire('status', { key: 'server.enabled', value: status })
 }
 function sleep (time) {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     setTimeout(() => {
       resolve()
     }, time)
@@ -31,6 +31,12 @@ const serverApi = {
     }
   },
   async start ({ mitmproxyPath, plugins }) {
+    // 防止重复启动：如果已有子进程存活，直接返回
+    if (server && server.process && !server.process.killed && server.process.exitCode == null) {
+      log.warn('server is already running, skip start (pid:', server.id, ')')
+      return { port: server.port }
+    }
+
     const allConfig = config.get()
     const serverConfig = lodash.cloneDeep(allConfig.server)
 
@@ -76,15 +82,35 @@ const serverApi = {
     // fireStatus('ing') // 启动中
     const basePath = serverConfig.setting.userBasePath
     const runningConfigPath = path.join(basePath, '/running.json')
-    fs.writeFileSync(runningConfigPath, jsonApi.stringify(serverConfig))
-    log.info('保存 running.json 运行时配置文件成功:', runningConfigPath)
+    try {
+      // 保留现有的 instance 信息（启动类型、pid 等），避免被配置覆盖
+      let existingInstance
+      if (fs.existsSync(runningConfigPath)) {
+        try {
+          const existing = JSON.parse(fs.readFileSync(runningConfigPath, 'utf-8'))
+          existingInstance = existing?.app?.instance
+        } catch {}
+      }
+      if (existingInstance) {
+        if (!serverConfig.app) {
+          serverConfig.app = {}
+        }
+        serverConfig.app.instance = existingInstance
+      }
+      fs.writeFileSync(runningConfigPath, jsonApi.stringify(serverConfig))
+      log.info('保存 running.json 运行时配置文件成功:', runningConfigPath)
+    } catch (e) {
+      log.error('保存 running.json 运行时配置文件失败:', runningConfigPath, ', error:', e)
+      throw e
+    }
     const serverProcess = fork(mitmproxyPath, [runningConfigPath])
     server = {
       id: serverProcess.pid,
       process: serverProcess,
+      port: serverConfig.port,
       close () {
         serverProcess.send({ type: 'action', event: { key: 'close' } })
-      }
+      },
     }
     serverProcess.on('beforeExit', (code) => {
       log.warn('server process beforeExit, code:', code)
@@ -98,8 +124,8 @@ const serverApi = {
     serverProcess.on('uncaughtException', (err, origin) => {
       log.error('server process uncaughtException:', err)
     })
-    serverProcess.on('message', function (msg) {
-      log.info('收到子进程消息:', JSON.stringify(msg))
+    serverProcess.on('message', (msg) => {
+      log.debug('收到子进程消息:', JSON.stringify(msg))
       if (msg.type === 'status') {
         fireStatus(msg.event)
       } else if (msg.type === 'error') {
@@ -125,31 +151,6 @@ const serverApi = {
   async close () {
     return await serverApi.kill()
   },
-  async close1 () {
-    return new Promise((resolve, reject) => {
-      if (server) {
-        // fireStatus('ing')// 关闭中
-        server.close((err) => {
-          if (err) {
-            log.warn('close error:', err)
-            if (err.code === 'ERR_SERVER_NOT_RUNNING') {
-              log.info('代理服务关闭成功')
-              resolve()
-              return
-            }
-            log.warn('代理服务关闭失败:', err)
-            reject(err)
-          } else {
-            log.info('代理服务关闭成功')
-            resolve()
-          }
-        })
-      } else {
-        log.info('server is null')
-        resolve()
-      }
-    })
-  },
   async restart ({ mitmproxyPath }) {
     await serverApi.kill()
     await serverApi.start({ mitmproxyPath })
@@ -166,6 +167,6 @@ const serverApi = {
     if (server) {
       server.process.send({ type: 'speed', event: { key: 'reTest' } })
     }
-  }
+  },
 }
 module.exports = serverApi

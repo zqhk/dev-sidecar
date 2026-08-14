@@ -1,24 +1,42 @@
+const fs = require('node:fs')
 const Shell = require('../shell')
+
 const execute = Shell.execute
+
 const executor = {
   async windows (exec, { certPath }) {
-    const cmds = ['start "" "' + certPath + '"']
-    // eslint-disable-next-line no-unused-vars
-    const ret = await exec(cmds, { type: 'cmd' })
+    if (!certPath) {
+      throw new Error('证书路径为空，无法安装根证书。请确认证书文件已生成。')
+    }
+    if (!fs.existsSync(certPath)) {
+      throw new Error(`证书文件不存在: ${certPath}`)
+    }
+    const cmds = [`start "" "${certPath}"`]
+    await exec(cmds, { type: 'cmd' })
     return true
   },
   async linux (exec, { certPath }) {
+    if (!certPath) {
+      throw new Error('证书路径为空，无法安装根证书。请确认证书文件已生成。')
+    }
+    if (!fs.existsSync(certPath)) {
+      throw new Error(`证书文件不存在: ${certPath}`)
+    }
     const cmds = [`sudo cp ${certPath} /usr/local/share/ca-certificates`, 'sudo update-ca-certificates ']
-    // eslint-disable-next-line no-unused-vars
-    const ret = await exec(cmds)
+    await exec(cmds)
     return true
   },
   async mac (exec, { certPath }) {
-    const cmds = ['open "' + certPath + '"']
-    // eslint-disable-next-line no-unused-vars
-    const ret = await exec(cmds, { type: 'cmd' })
+    if (!certPath) {
+      throw new Error('证书路径为空，无法安装根证书。请确认证书文件已生成。')
+    }
+    if (!fs.existsSync(certPath)) {
+      throw new Error(`证书文件不存在: ${certPath}`)
+    }
+    const cmds = [`open "${certPath}"`]
+    await exec(cmds, { type: 'cmd' })
     return true
-  }
+  },
 }
 
 module.exports = async function (args) {
